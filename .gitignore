@@ -1,0 +1,16 @@
+# Rust
+/target/
+**/*.rs.bk
+**/*.bak
+
+# Tool Specific
+chromedriver.exe
+accounts.json
+Export/
+
+# Environment
+.env
+
+# OS generated files
+.DS_Store
+Thumbs.db
