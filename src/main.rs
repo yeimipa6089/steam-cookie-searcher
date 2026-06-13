@@ -230,9 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(std::time::Duration::from_millis(16))? {
             match event::read()? {
                 Event::Paste(text) => {
-                    if app.mode == AppMode::PasteText
-                        || app.mode == AppMode::PasteProxyText
-                        || app.mode == AppMode::InputPath
+                    if app.mode == AppMode::InputPath
                         || app.mode == AppMode::InputProxyPath
                     {
                         app.input_buffer.push_str(&text);
@@ -569,7 +567,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             KeyCode::Char('2') => {
                                 app.input_buffer.clear();
-                                app.mode = AppMode::PasteText;
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    if let Ok(input) = clipboard.get_text() {
+                                        if !input.trim().is_empty() {
+                                            app.mode = AppMode::Scanning;
+                                            app.add_log("scanning pasted cookies...".to_string());
+                                            let tx = log_tx.clone();
+                                            let data_tx = data_tx.clone();
+                                            let current_proxies = app.proxies.clone();
+                                            tokio::spawn(async move {
+                                                let lines = input.lines().map(|s| s.to_string());
+                                                let parsed = parse_netscape_lines(lines);
+                                                if !parsed.is_empty() {
+                                                    let grouped = crate::parser::input::group_cookies_by_account(parsed);
+                                                    let mut all_cookies = Vec::new();
+                                                    for (id, cookie_group) in grouped {
+                                                        all_cookies.push((
+                                                            format!("Pasted ({})", id),
+                                                            cookie_group,
+                                                        ));
+                                                    }
+                                                    process_cookie_results(
+                                                        all_cookies,
+                                                        &tx,
+                                                        &data_tx,
+                                                        current_proxies,
+                                                    )
+                                                    .await;
+                                                } else {
+                                                    let _ = tx.send("error: no valid cookies found in clipboard".to_string());
+                                                }
+                                            });
+                                        } else {
+                                            app.add_log("clipboard is empty".to_string());
+                                            app.mode = AppMode::Normal;
+                                        }
+                                    } else {
+                                        app.add_log("failed to read text from clipboard".to_string());
+                                        app.mode = AppMode::Normal;
+                                    }
+                                } else {
+                                    app.add_log("clipboard error".to_string());
+                                    app.mode = AppMode::Normal;
+                                }
                             }
                             _ => {}
                         },
@@ -583,7 +623,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             KeyCode::Char('2') => {
                                 app.input_buffer.clear();
-                                app.mode = AppMode::PasteProxyText;
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    if let Ok(input) = clipboard.get_text() {
+                                        if !input.trim().is_empty() {
+                                            app.mode = AppMode::Scanning;
+                                            app.add_log("verifying pasted proxies...".to_string());
+                                            let tx = log_tx.clone();
+                                            let proxy_tx = proxy_tx.clone();
+                                            tokio::spawn(async move {
+                                                let lines = parse_proxies_from_text(&input);
+                                                let working = test_proxies(lines, tx).await;
+                                                let _ = proxy_tx.send(working);
+                                            });
+                                        } else {
+                                            app.add_log("clipboard is empty".to_string());
+                                            app.mode = AppMode::Normal;
+                                        }
+                                    } else {
+                                        app.add_log("failed to read text from clipboard".to_string());
+                                        app.mode = AppMode::Normal;
+                                    }
+                                } else {
+                                    app.add_log("clipboard error".to_string());
+                                    app.mode = AppMode::Normal;
+                                }
                             }
                             _ => {}
                         },
@@ -635,61 +698,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             _ => {}
                         },
-                        AppMode::PasteText => {
-                            match key.code {
-                                KeyCode::Esc => {
-                                    app.mode = AppMode::Normal;
-                                }
-                                KeyCode::Enter => {
-                                    app.input_buffer.push('\n');
-                                    if app.input_buffer.ends_with("\n\n") {
-                                        let input = app.input_buffer.clone();
-                                        if !input.trim().is_empty() {
-                                            app.mode = AppMode::Scanning;
-                                            app.add_log("scanning pasted cookies...".to_string());
-                                            let tx = log_tx.clone();
-                                            let data_tx = data_tx.clone();
-                                            let current_proxies = app.proxies.clone();
-                                            tokio::spawn(async move {
-                                                let lines = input.lines().map(|s| s.to_string());
-                                                let parsed = parse_netscape_lines(lines);
-                                                if !parsed.is_empty() {
-                                                    let grouped = crate::parser::input::group_cookies_by_account(parsed);
-                                                    let mut all_cookies = Vec::new();
-                                                    for (id, cookie_group) in grouped {
-                                                        all_cookies.push((
-                                                            format!("Pasted ({})", id),
-                                                            cookie_group,
-                                                        ));
-                                                    }
-                                                    process_cookie_results(
-                                                        all_cookies,
-                                                        &tx,
-                                                        &data_tx,
-                                                        current_proxies,
-                                                    )
-                                                    .await;
-                                                } else {
-                                                    let _ = tx.send("error: no valid cookies found in pasted text".to_string());
-                                                }
-                                            });
-                                        } else {
-                                            app.mode = AppMode::Normal;
-                                        }
-                                    }
-                                }
-                                KeyCode::Backspace => {
-                                    app.input_buffer.pop();
-                                }
-                                KeyCode::Char(c) => {
-                                    app.input_buffer.push(c);
-                                }
-                                KeyCode::Tab => {
-                                    app.input_buffer.push('\t');
-                                }
-                                _ => {}
-                            }
-                        }
+
                         AppMode::InputProxyPath => match key.code {
                             KeyCode::Esc => {
                                 app.mode = AppMode::Normal;
@@ -732,40 +741,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             _ => {}
                         },
-                        AppMode::PasteProxyText => match key.code {
-                            KeyCode::Esc => {
-                                app.mode = AppMode::Normal;
-                            }
-                            KeyCode::Enter => {
-                                app.input_buffer.push('\n');
-                                if app.input_buffer.ends_with("\n\n") {
-                                    let input = app.input_buffer.clone();
-                                    if !input.trim().is_empty() {
-                                        app.mode = AppMode::Scanning;
-                                        app.add_log("verifying pasted proxies...".to_string());
-                                        let tx = log_tx.clone();
-                                        let proxy_tx = proxy_tx.clone();
-                                        tokio::spawn(async move {
-                                            let lines = parse_proxies_from_text(&input);
-                                            let working = test_proxies(lines, tx).await;
-                                            let _ = proxy_tx.send(working);
-                                        });
-                                    } else {
-                                        app.mode = AppMode::Normal;
-                                    }
-                                }
-                            }
-                            KeyCode::Backspace => {
-                                app.input_buffer.pop();
-                            }
-                            KeyCode::Char(c) => {
-                                app.input_buffer.push(c);
-                            }
-                            KeyCode::Tab => {
-                                app.input_buffer.push('\t');
-                            }
-                            _ => {}
-                        },
+
                     }
                 }
                 _ => {}

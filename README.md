@@ -145,7 +145,7 @@ cargo run                # Run the application
 ### <img alt="keybinds icon" height="18" src="./assets/readme/keybinds.svg" style="vertical-align: middle;">&nbsp;&nbsp;Keybindings
 Interact with the TUI using the following controls:
 
-- <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> : Toggle between input modes *(Clipboard, Paste, Local)*.
+- <kbd>1</kbd> <kbd>2</kbd> : Toggle between input modes *(Local File, Clipboard)*.
 - <kbd>Tab</kbd> : Switch between the `Data` panel and the `Network` inspector.
 - <kbd>Enter</kbd> : View detailed breakdown of a selected row.
 - <kbd>E</kbd> : Export valid sessions to disk.

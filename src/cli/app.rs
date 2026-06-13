@@ -7,9 +7,7 @@ pub enum AppMode {
     SelectCookiesMethod,
     SelectProxiesMethod,
     InputPath,
-    PasteText,
     InputProxyPath,
-    PasteProxyText,
     Scanning,
 }
 

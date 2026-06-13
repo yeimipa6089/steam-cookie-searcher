@@ -96,8 +96,10 @@ pub fn short_url(url: &str) -> String {
     }
 }
 
-pub async fn fetch_text(client: &reqwest::Client, url: &str) -> Option<String> {
-    let req = client.get(url).headers(default_headers()).build().ok()?;
+async fn execute_request(client: &reqwest::Client, req: reqwest::Request) -> Option<String> {
+    let method = req.method().as_str().to_string();
+    let url = req.url().to_string();
+
     let req_headers: Vec<(String, String)> = req
         .headers()
         .iter()
@@ -119,8 +121,8 @@ pub async fn fetch_text(client: &reqwest::Client, url: &str) -> Option<String> {
             let body = r.text().await.ok();
 
             emit_network(NetworkRequest {
-                method: "GET".into(),
-                url: url.into(),
+                method,
+                url,
                 status: Some(status),
                 req_headers,
                 res_headers,
@@ -131,8 +133,8 @@ pub async fn fetch_text(client: &reqwest::Client, url: &str) -> Option<String> {
         }
         Err(e) => {
             emit_network(NetworkRequest {
-                method: "GET".into(),
-                url: url.into(),
+                method,
+                url,
                 status: None,
                 req_headers,
                 res_headers: vec![],
@@ -142,100 +144,20 @@ pub async fn fetch_text(client: &reqwest::Client, url: &str) -> Option<String> {
             None
         }
     }
+}
+
+pub async fn fetch_text(client: &reqwest::Client, url: &str) -> Option<String> {
+    let req = client.get(url).headers(default_headers()).build().ok()?;
+    execute_request(client, req).await
 }
 
 pub async fn fetch_json(client: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
     let req = client.get(url).headers(default_headers()).build().ok()?;
-    let req_headers: Vec<(String, String)> = req
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
-
-    let start = std::time::Instant::now();
-    let res = client.execute(req).await;
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    match res {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            let res_headers: Vec<(String, String)> = r
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
-            let body_str = r.text().await.ok()?;
-
-            emit_network(NetworkRequest {
-                method: "GET".into(),
-                url: url.into(),
-                status: Some(status),
-                req_headers,
-                res_headers,
-                response_body: Some(body_str.clone()),
-                duration_ms,
-            });
-            serde_json::from_str(&body_str).ok()
-        }
-        Err(e) => {
-            emit_network(NetworkRequest {
-                method: "GET".into(),
-                url: url.into(),
-                status: None,
-                req_headers,
-                res_headers: vec![],
-                response_body: Some(e.to_string()),
-                duration_ms,
-            });
-            None
-        }
-    }
+    let body_str = execute_request(client, req).await?;
+    serde_json::from_str(&body_str).ok()
 }
 
 pub async fn post_text(client: &reqwest::Client, url: &str) -> Option<String> {
     let req = client.post(url).headers(default_headers()).build().ok()?;
-    let req_headers: Vec<(String, String)> = req
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
-
-    let start = std::time::Instant::now();
-    let res = client.execute(req).await;
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    match res {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            let res_headers: Vec<(String, String)> = r
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
-            let body = r.text().await.ok();
-
-            emit_network(NetworkRequest {
-                method: "POST".into(),
-                url: url.into(),
-                status: Some(status),
-                req_headers,
-                res_headers,
-                response_body: body.clone(),
-                duration_ms,
-            });
-            body
-        }
-        Err(e) => {
-            emit_network(NetworkRequest {
-                method: "POST".into(),
-                url: url.into(),
-                status: None,
-                req_headers,
-                res_headers: vec![],
-                response_body: Some(e.to_string()),
-                duration_ms,
-            });
-            None
-        }
-    }
+    execute_request(client, req).await
 }

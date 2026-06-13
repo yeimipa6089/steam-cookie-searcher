@@ -66,7 +66,21 @@ where
     let mut cookies = Vec::new();
     let text = lines.collect::<Vec<String>>().join("\n");
 
-    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&text)
+    if parse_json_cookies(&text, &mut cookies) {
+        return cookies;
+    }
+
+    for line in text.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        parse_tsv_cookie_line(line, &mut cookies);
+    }
+    cookies
+}
+
+fn parse_json_cookies(text: &str, cookies: &mut Vec<SteamCookie>) -> bool {
+    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(text)
         && let Some(arr) = json_val.as_array()
     {
         for item in arr {
@@ -87,48 +101,42 @@ where
                 });
             }
         }
-        if !cookies.is_empty() {
-            return cookies;
+        return !cookies.is_empty();
+    }
+    false
+}
+
+fn parse_tsv_cookie_line(line: &str, cookies: &mut Vec<SteamCookie>) {
+    let parts: Vec<&str> = line.split('\t').collect();
+    let fallback_parts: Vec<&str> = line.split_whitespace().collect();
+
+    if parts.len() < 7 && fallback_parts.len() >= 7 {
+        let value = fallback_parts[6..].join(" ");
+        let domain = fallback_parts[0].trim().to_string();
+        let flag = fallback_parts[3].trim().to_uppercase();
+        if domain.contains('.') && (flag == "TRUE" || flag == "FALSE") {
+            cookies.push(SteamCookie {
+                domain,
+                secure: flag == "TRUE",
+                name: fallback_parts[5].trim().to_string(),
+                value: value.trim().to_string(),
+            });
         }
+        return;
     }
 
-    for line in text.lines() {
-        if line.starts_with('#') || line.trim().is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split('\t').collect();
-
-        let fallback_parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 7 && fallback_parts.len() >= 7 {
-            let value = fallback_parts[6..].join(" ");
-            let domain = fallback_parts[0].trim().to_string();
-            let flag = fallback_parts[3].trim().to_uppercase();
-            if domain.contains('.') && (flag == "TRUE" || flag == "FALSE") {
-                cookies.push(SteamCookie {
-                    domain,
-                    secure: flag == "TRUE",
-                    name: fallback_parts[5].trim().to_string(),
-                    value: value.trim().to_string(),
-                });
-            }
-            continue;
-        }
-
-        if parts.len() >= 7 {
-            let domain = parts[0].trim().to_string();
-            let flag = parts[3].trim().to_uppercase();
-            if domain.contains('.') && (flag == "TRUE" || flag == "FALSE") {
-                cookies.push(SteamCookie {
-                    domain,
-                    secure: flag == "TRUE",
-                    name: parts[5].trim().to_string(),
-                    value: parts[6].trim().to_string(),
-                });
-            }
+    if parts.len() >= 7 {
+        let domain = parts[0].trim().to_string();
+        let flag = parts[3].trim().to_uppercase();
+        if domain.contains('.') && (flag == "TRUE" || flag == "FALSE") {
+            cookies.push(SteamCookie {
+                domain,
+                secure: flag == "TRUE",
+                name: parts[5].trim().to_string(),
+                value: parts[6].trim().to_string(),
+            });
         }
     }
-    cookies
 }
 
 pub fn get_bulk_path_from_input() -> Result<String, std::io::Error> {
@@ -155,74 +163,76 @@ pub fn process_bulk_input(path: &str) -> Result<BulkResult, Box<dyn std::error::
         return Err(format!("Path does not exist: {}", path).into());
     }
 
-    let is_zip = path_obj
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
-
-    if is_zip {
-        println!("  \x1b[2m↳ Extracting ZIP archive...\x1b[0m");
-        let file = File::open(path)?;
-        let mut archive = ZipArchive::new(file)?;
-
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            if file.is_file() {
-                let name = file.name().to_string();
-                let mut contents = String::new();
-                use std::io::Read;
-                if file.read_to_string(&mut contents).is_ok() {
-                    let lines = contents.lines().map(|s| s.to_string());
-                    let parsed = parse_netscape_lines(lines);
-                    if !parsed.is_empty() {
-                        let grouped = crate::parser::input::group_cookies_by_account(parsed);
-                        for (id, cookie_group) in grouped {
-                            let acc_name = format!("{} ({})", name, id);
-                            results.push((acc_name, cookie_group));
-                        }
-                    }
-                }
-            }
-        }
+    if path_obj.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip")) {
+        process_zip_file(path, &mut results)?;
     } else if path_obj.is_dir() {
-        println!("  \x1b[2m↳ Scanning folder...\x1b[0m");
-        for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
-            if entry.file_type().is_file() {
-                let file_path = entry.path().to_string_lossy().to_string();
-                if let Ok(parsed) = parse_netscape_cookies_from_file(&file_path)
-                    && !parsed.is_empty()
-                {
+        process_directory(path, &mut results);
+    } else if path_obj.is_file() && path_obj.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) {
+        process_txt_file(path, &mut results);
+    } else {
+        return Err("Path is neither a directory, zip file, nor a .txt file.".into());
+    }
+
+    println!("  \x1b[32m✔ Found {} valid cookie files.\x1b[0m\n", results.len());
+    Ok(results)
+}
+
+fn process_zip_file(path: &str, results: &mut BulkResult) -> Result<(), Box<dyn std::error::Error>> {
+    println!("  \x1b[2m↳ Extracting ZIP archive...\x1b[0m");
+    let file = File::open(path)?;
+    let mut archive = ZipArchive::new(file)?;
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        if file.is_file() {
+            let name = file.name().to_string();
+            let mut contents = String::new();
+            use std::io::Read;
+            if file.read_to_string(&mut contents).is_ok() {
+                let lines = contents.lines().map(|s| s.to_string());
+                let parsed = parse_netscape_lines(lines);
+                if !parsed.is_empty() {
                     let grouped = crate::parser::input::group_cookies_by_account(parsed);
                     for (id, cookie_group) in grouped {
-                        let acc_name = format!("{} ({})", file_path, id);
+                        let acc_name = format!("{} ({})", name, id);
                         results.push((acc_name, cookie_group));
                     }
                 }
             }
         }
-    } else if path_obj.is_file()
-        && path_obj
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("txt"))
-    {
-        println!("  \x1b[2m↳ Scanning text file...\x1b[0m");
-        if let Ok(parsed) = parse_netscape_cookies_from_file(path)
-            && !parsed.is_empty()
-        {
-            let grouped = crate::parser::input::group_cookies_by_account(parsed);
-            for (id, cookie_group) in grouped {
-                let acc_name = format!("{} ({})", path, id);
-                results.push((acc_name, cookie_group));
+    }
+    Ok(())
+}
+
+fn process_directory(path: &str, results: &mut BulkResult) {
+    println!("  \x1b[2m↳ Scanning folder...\x1b[0m");
+    for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
+        if entry.file_type().is_file() {
+            let file_path = entry.path().to_string_lossy().to_string();
+            if let Ok(parsed) = parse_netscape_cookies_from_file(&file_path)
+                && !parsed.is_empty()
+            {
+                let grouped = crate::parser::input::group_cookies_by_account(parsed);
+                for (id, cookie_group) in grouped {
+                    let acc_name = format!("{} ({})", file_path, id);
+                    results.push((acc_name, cookie_group));
+                }
             }
         }
-    } else {
-        return Err("Path is neither a directory, zip file, nor a .txt file.".into());
     }
+}
 
-    println!(
-        "  \x1b[32m✔ Found {} valid cookie files.\x1b[0m\n",
-        results.len()
-    );
-    Ok(results)
+fn process_txt_file(path: &str, results: &mut BulkResult) {
+    println!("  \x1b[2m↳ Scanning text file...\x1b[0m");
+    if let Ok(parsed) = parse_netscape_cookies_from_file(path)
+        && !parsed.is_empty()
+    {
+        let grouped = crate::parser::input::group_cookies_by_account(parsed);
+        for (id, cookie_group) in grouped {
+            let acc_name = format!("{} ({})", path, id);
+            results.push((acc_name, cookie_group));
+        }
+    }
 }
 
 pub fn group_cookies_by_account(
@@ -230,8 +240,20 @@ pub fn group_cookies_by_account(
 ) -> std::collections::HashMap<String, Vec<SteamCookie>> {
     let mut map = std::collections::HashMap::new();
 
+    let all_ids = collect_steam_ids(&cookies);
+
+    if all_ids.len() <= 1 {
+        let id = all_ids.into_iter().next().unwrap_or_else(|| "unknown".to_string());
+        map.insert(id, cookies);
+        return map;
+    }
+
+    group_multiple_accounts(cookies, map)
+}
+
+fn collect_steam_ids(cookies: &[SteamCookie]) -> std::collections::HashSet<String> {
     let mut all_ids = std::collections::HashSet::new();
-    for c in &cookies {
+    for c in cookies {
         if (c.name == "steamLoginSecure" || c.name == "steamMachineAuth")
             && let Some(idx) = c.value.find("%7C%7C").or_else(|| c.value.find("||"))
         {
@@ -241,16 +263,13 @@ pub fn group_cookies_by_account(
             }
         }
     }
+    all_ids
+}
 
-    if all_ids.len() <= 1 {
-        let id = all_ids
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| "unknown".to_string());
-        map.insert(id, cookies);
-        return map;
-    }
-
+fn group_multiple_accounts(
+    cookies: Vec<SteamCookie>,
+    mut map: std::collections::HashMap<String, Vec<SteamCookie>>,
+) -> std::collections::HashMap<String, Vec<SteamCookie>> {
     let mut current_group = Vec::new();
     let mut active_id = "unknown".to_string();
 
@@ -261,9 +280,7 @@ pub fn group_cookies_by_account(
             let id = c.value[..idx].to_string();
             if id.chars().all(char::is_numeric) {
                 if active_id != "unknown" && active_id != id && !current_group.is_empty() {
-                    map.entry(active_id.clone())
-                        .or_insert_with(Vec::new)
-                        .extend(current_group);
+                    map.entry(active_id.clone()).or_default().extend(current_group);
                     current_group = Vec::new();
                 }
                 active_id = id;
@@ -273,9 +290,7 @@ pub fn group_cookies_by_account(
     }
 
     if !current_group.is_empty() && active_id != "unknown" {
-        map.entry(active_id)
-            .or_insert_with(Vec::new)
-            .extend(current_group);
+        map.entry(active_id).or_default().extend(current_group);
     }
 
     map

@@ -1,43 +1,38 @@
 use crate::models::proxy::ProxyInfo;
 
-pub async fn get_ip_country(ip: &str) -> String {
-    if let Ok(res) = reqwest::get(&format!("https://get.geojs.io/v1/ip/country/{}.json", ip)).await
-        && let Ok(json) = res.json::<serde_json::Value>().await
+async fn parse_country_response(res: Result<reqwest::Response, reqwest::Error>) -> Option<String> {
+    if let Ok(response) = res
+        && let Ok(json) = response.json::<serde_json::Value>().await
         && let Some(cc) = json["country"].as_str()
     {
-        return cc.to_string();
+        return Some(cc.to_string());
     }
-    "UNKNOWN".to_string()
+    None
+}
+
+pub async fn get_ip_country(ip: &str) -> String {
+    let res = reqwest::get(&format!("https://get.geojs.io/v1/ip/country/{}.json", ip)).await;
+    parse_country_response(res).await.unwrap_or_else(|| "UNKNOWN".to_string())
 }
 
 pub async fn check_proxy_geoip(proxy: String) -> Option<ProxyInfo> {
-    let mut clean_proxy = proxy.clone();
-    if !clean_proxy.starts_with("http") && !clean_proxy.starts_with("socks") {
-        clean_proxy = format!("http://{}", clean_proxy);
-    }
-
-    let client_builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5));
-
-    let client = if let Ok(p) = reqwest::Proxy::all(&clean_proxy) {
-        client_builder
-            .proxy(p)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+    let clean_proxy = if proxy.starts_with("http") || proxy.starts_with("socks") {
+        proxy.clone()
     } else {
-        return None;
+        format!("http://{}", proxy)
     };
 
-    if let Ok(res) = client
-        .get("https://get.geojs.io/v1/ip/country.json")
-        .send()
-        .await
-        && let Ok(json) = res.json::<serde_json::Value>().await
-        && let Some(cc) = json["country"].as_str()
-    {
-        return Some(ProxyInfo {
-            url: clean_proxy,
-            country_code: cc.to_string(),
-        });
-    }
-    None
+    let p = reqwest::Proxy::all(&clean_proxy).ok()?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .proxy(p)
+        .build()
+        .ok()?;
+
+    let res = client.get("https://get.geojs.io/v1/ip/country.json").send().await;
+
+    parse_country_response(res).await.map(|cc| ProxyInfo {
+        url: clean_proxy,
+        country_code: cc,
+    })
 }

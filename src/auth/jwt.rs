@@ -48,6 +48,11 @@ pub fn extract_jwt_from_cookie(cookie_value: &str) -> Option<serde_json::Value> 
 }
 
 pub async fn extract_token_info(cookies: &[SteamCookie], data: &mut AccountData) {
+    extract_steam_login_secure(cookies, data).await;
+    extract_steam_refresh(cookies, data).await;
+}
+
+async fn extract_steam_login_secure(cookies: &[SteamCookie], data: &mut AccountData) {
     if let Some(c) = cookies.iter().find(|c| c.name == "steamLoginSecure")
         && let Some(jwt) = extract_jwt_from_cookie(&c.value)
     {
@@ -69,7 +74,9 @@ pub async fn extract_token_info(cookies: &[SteamCookie], data: &mut AccountData)
             data.token_aud = audiences.join(", ");
         }
     }
+}
 
+async fn extract_steam_refresh(cookies: &[SteamCookie], data: &mut AccountData) {
     if let Some(c) = cookies.iter().find(|c| c.name == "steamRefresh_steam")
         && let Some(jwt) = extract_jwt_from_cookie(&c.value)
     {

@@ -5,86 +5,224 @@ use crate::utils::xml::xml_tag;
 use regex::Regex;
 use scraper::{Html, Selector};
 
+fn parse_wallet_amounts(wallet: &serde_json::Value) -> (u64, u64, u64) {
+    let amount = wallet.get("amount").and_then(|v| {
+        v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+    }).unwrap_or(0);
+    
+    let delayed = wallet
+        .get("balance_delayed")
+        .or_else(|| wallet.get("delayed_balance"))
+        .or_else(|| wallet.get("balance_pending"))
+        .and_then(|v| {
+            v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+        }).unwrap_or(0);
+
+    let currency_code = wallet.get("currency").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    (amount, delayed, currency_code)
+}
+
 pub async fn fetch_fundwalletinfo(client: &reqwest::Client, data: &mut AccountData) -> bool {
     let url = "https://store.steampowered.com/api/getfundwalletinfo/?l=english";
     if let Some(json) = fetch_json(client, url).await {
-        if let Some(wallet) = json.get("user_wallet") {
-            let amount_opt = wallet.get("amount").and_then(|v| {
-                v.as_u64()
-                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-            });
-            let delayed_opt = wallet
-                .get("balance_delayed")
-                .or_else(|| wallet.get("delayed_balance"))
-                .or_else(|| wallet.get("balance_pending"))
-                .and_then(|v| {
-                    v.as_u64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                });
+        let country_code = json.get("country_code").and_then(|v| v.as_str()).unwrap_or("");
+        
+        let (amount, delayed, currency_code) = json.get("user_wallet")
+            .map(parse_wallet_amounts)
+            .unwrap_or((0, 0, 0));
 
-            if let Some(amount) = amount_opt {
-                let currency_code = wallet.get("currency").and_then(|v| v.as_u64()).unwrap_or(0);
-                let currency = match currency_code {
-                    1 => "USD",
-                    2 => "GBP",
-                    3 => "EUR",
-                    4 => "CHF",
-                    5 => "RUB",
-                    6 => "PLN",
-                    7 => "BRL",
-                    8 => "JPY",
-                    9 => "NOK",
-                    10 => "IDR",
-                    11 => "MYR",
-                    12 => "PHP",
-                    13 => "SGD",
-                    14 => "THB",
-                    15 => "VND",
-                    16 => "KRW",
-                    17 => "TRY",
-                    18 => "UAH",
-                    19 => "MXN",
-                    20 => "CAD",
-                    21 => "AUD",
-                    22 => "NZD",
-                    23 => "CNY",
-                    24 => "INR",
-                    25 => "CLP",
-                    26 => "PEN",
-                    27 => "COP",
-                    28 => "ZAR",
-                    29 => "HKD",
-                    30 => "TWD",
-                    31 => "SAR",
-                    32 => "AED",
-                    34 => "ARS",
-                    35 => "ILS",
-                    37 => "KZT",
-                    38 => "KWD",
-                    39 => "QAR",
-                    40 => "CRC",
-                    41 => "UYU",
-                    _ => "Unknown",
-                };
-                let formatted = format!("{:.2} {}", amount as f64 / 100.0, currency);
-                if data.wallet_balance == "—" || data.wallet_balance.is_empty() {
-                    data.wallet_balance = formatted;
-                }
-
-                if let Some(delayed) = delayed_opt {
-                    data.hold_balance = format!("{:.2} {}", delayed as f64 / 100.0, currency);
-                } else {
-                    data.hold_balance = "0.00".to_string();
-                }
-                data.inventory_balance = "0.00".to_string();
-            }
+        let currency = get_currency_string(currency_code, country_code);
+        let balance_main = amount as f64 / 100.0;
+        let usd_rate = get_usd_rate(currency);
+        let usd_equiv = balance_main * usd_rate;
+        
+        let formatted = format!("{:.2} {} (USD {:.2})", balance_main, currency, usd_equiv);
+        if data.wallet_balance == "—" || data.wallet_balance.is_empty() {
+            data.wallet_balance = formatted;
         }
-        if let Some(cc) = json.get("country_code").and_then(|v| v.as_str()) {
-            data.country = cc.to_string();
+
+        let hold_main = delayed as f64 / 100.0;
+        data.hold_balance = format!("{:.2} {} (USD {:.2})", hold_main, currency, hold_main * usd_rate);
+        data.inventory_balance = format!("0.00 {} (USD 0.00)", currency);
+
+        if !country_code.is_empty() {
+            data.country = country_code.to_string();
         }
         return true;
     }
     false
+}
+
+fn get_currency_string(code: u64, country_code: &str) -> &'static str {
+    match code {
+        1 => "USD",
+        2 => "GBP",
+        3 => "EUR",
+        4 => "CHF",
+        5 => "RUB",
+        6 => "PLN",
+        7 => "BRL",
+        8 => "JPY",
+        9 => "NOK",
+        10 => "IDR",
+        11 => "MYR",
+        12 => "PHP",
+        13 => "SGD",
+        14 => "THB",
+        15 => "VND",
+        16 => "KRW",
+        17 => "TRY",
+        18 => "UAH",
+        19 => "MXN",
+        20 => "CAD",
+        21 => "AUD",
+        22 => "NZD",
+        23 => "CNY",
+        24 => "INR",
+        25 => "CLP",
+        26 => "PEN",
+        27 => "COP",
+        28 => "ZAR",
+        29 => "HKD",
+        30 => "TWD",
+        31 => "SAR",
+        32 => "AED",
+        34 => "ARS",
+        35 => "ILS",
+        37 => "KZT",
+        38 => "KWD",
+        39 => "QAR",
+        66 => "CRC",
+        67 => "UYU",
+        0 => match country_code {
+            "GB" | "UK" => "GBP",
+            "ES" | "DE" | "FR" | "IT" | "NL" | "BE" | "AT" | "IE" | "FI" | "PT" | "GR" | "EE" | "LV" | "LT" | "SK" | "SI" | "CY" | "MT" => "EUR",
+            "CH" | "LI" => "CHF",
+            "RU" => "RUB",
+            "PL" => "PLN",
+            "BR" => "BRL",
+            "JP" => "JPY",
+            "NO" => "NOK",
+            "ID" => "IDR",
+            "MY" => "MYR",
+            "PH" => "PHP",
+            "SG" => "SGD",
+            "TH" => "THB",
+            "VN" => "VND",
+            "KR" => "KRW",
+            "TR" => "TRY",
+            "UA" => "UAH",
+            "MX" => "MXN",
+            "CA" => "CAD",
+            "AU" => "AUD",
+            "NZ" => "NZD",
+            "CN" => "CNY",
+            "IN" => "INR",
+            "CL" => "CLP",
+            "PE" => "PEN",
+            "CO" => "COP",
+            "ZA" => "ZAR",
+            "HK" => "HKD",
+            "TW" => "TWD",
+            "SA" => "SAR",
+            "AE" => "AED",
+            "AR" => "ARS",
+            "IL" => "ILS",
+            "KZ" => "KZT",
+            "KW" => "KWD",
+            "QA" => "QAR",
+            "CR" => "CRC",
+            "UY" => "UYU",
+            _ => "USD",
+        },
+        _ => match country_code {
+            "GB" | "UK" => "GBP",
+            "ES" | "DE" | "FR" | "IT" | "NL" | "BE" | "AT" | "IE" | "FI" | "PT" | "GR" | "EE" | "LV" | "LT" | "SK" | "SI" | "CY" | "MT" => "EUR",
+            "CH" | "LI" => "CHF",
+            "RU" => "RUB",
+            "PL" => "PLN",
+            "BR" => "BRL",
+            "JP" => "JPY",
+            "NO" => "NOK",
+            "ID" => "IDR",
+            "MY" => "MYR",
+            "PH" => "PHP",
+            "SG" => "SGD",
+            "TH" => "THB",
+            "VN" => "VND",
+            "KR" => "KRW",
+            "TR" => "TRY",
+            "UA" => "UAH",
+            "MX" => "MXN",
+            "CA" => "CAD",
+            "AU" => "AUD",
+            "NZ" => "NZD",
+            "CN" => "CNY",
+            "IN" => "INR",
+            "CL" => "CLP",
+            "PE" => "PEN",
+            "CO" => "COP",
+            "ZA" => "ZAR",
+            "HK" => "HKD",
+            "TW" => "TWD",
+            "SA" => "SAR",
+            "AE" => "AED",
+            "AR" => "ARS",
+            "IL" => "ILS",
+            "KZ" => "KZT",
+            "KW" => "KWD",
+            "QA" => "QAR",
+            "CR" => "CRC",
+            "UY" => "UYU",
+            _ => "USD",
+        },
+    }
+}
+
+fn get_usd_rate(currency: &str) -> f64 {
+    match currency {
+        "USD" => 1.0,
+        "EUR" => 1.08,
+        "GBP" => 1.27,
+        "CHF" => 1.13,
+        "RUB" => 0.011,
+        "PLN" => 0.25,
+        "BRL" => 0.19,
+        "JPY" => 0.0064,
+        "NOK" => 0.095,
+        "IDR" => 0.000062,
+        "MYR" => 0.21,
+        "PHP" => 0.017,
+        "SGD" => 0.74,
+        "THB" => 0.027,
+        "VND" => 0.000039,
+        "KRW" => 0.00073,
+        "TRY" => 0.031,
+        "UAH" => 0.025,
+        "MXN" => 0.056,
+        "CAD" => 0.73,
+        "AUD" => 0.66,
+        "NZD" => 0.61,
+        "CNY" => 0.14,
+        "INR" => 0.012,
+        "CLP" => 0.0011,
+        "PEN" => 0.27,
+        "COP" => 0.00026,
+        "ZAR" => 0.053,
+        "HKD" => 0.13,
+        "TWD" => 0.031,
+        "SAR" => 0.27,
+        "AED" => 0.27,
+        "ARS" => 0.0011,
+        "ILS" => 0.27,
+        "KZT" => 0.0022,
+        "KWD" => 3.25,
+        "QAR" => 0.27,
+        "CRC" => 0.0019,
+        "UYU" => 0.026,
+        _ => 1.0,
+    }
 }
 pub async fn fetch_ajaxlistfriends(client: &reqwest::Client, data: &mut AccountData) {
     let url = "https://steamcommunity.com/actions/ajaxlistfriends";
@@ -215,23 +353,11 @@ pub async fn scrape_xml_profile(client: &reqwest::Client, steam_id: &str, data: 
         return;
     };
 
-    let username = xml_tag(&xml, "steamID");
-    if !username.is_empty() {
-        data.username = username;
-    }
+    assign_non_empty(&mut data.username, xml_tag(&xml, "steamID"));
+    assign_non_empty(&mut data.custom_url, xml_tag(&xml, "customURL"));
+    assign_non_empty(&mut data.member_since, xml_tag(&xml, "memberSince"));
 
-    let custom = xml_tag(&xml, "customURL");
-    if !custom.is_empty() {
-        data.custom_url = custom;
-    }
-
-    let member = xml_tag(&xml, "memberSince");
-    if !member.is_empty() {
-        data.member_since = member;
-    }
-
-    let vac = xml_tag(&xml, "vacBanned");
-    data.vac = if vac == "1" {
+    data.vac = if xml_tag(&xml, "vacBanned") == "1" {
         "✗".into()
     } else {
         "✓".into()
@@ -244,16 +370,20 @@ pub async fn scrape_xml_profile(client: &reqwest::Client, steam_id: &str, data: 
         "✗".into()
     };
 
-    let limited = xml_tag(&xml, "isLimitedAccount");
-    data.limited = if limited == "1" {
+    data.limited = if xml_tag(&xml, "isLimitedAccount") == "1" {
         "✗ Limited".into()
     } else {
         "✓".into()
     };
 
-    let privacy = xml_tag(&xml, "privacyState");
-    if privacy.eq_ignore_ascii_case("private") {
+    if xml_tag(&xml, "privacyState").eq_ignore_ascii_case("private") {
         data.community_ban = "Private".into();
+    }
+}
+
+fn assign_non_empty(target: &mut String, value: String) {
+    if !value.is_empty() {
+        *target = value;
     }
 }
 
@@ -262,7 +392,13 @@ pub async fn scrape_html_profile(client: &reqwest::Client, steam_id: &str, data:
     let Some(html) = fetch_text(client, &url).await else {
         return;
     };
-    let doc = Html::parse_document(&html);
+
+    parse_html_dom(&html, data);
+    parse_html_regex(&html, data);
+}
+
+fn parse_html_dom(html: &str, data: &mut AccountData) {
+    let doc = Html::parse_document(html);
 
     if data.username.is_empty()
         && let Some(el) = doc
@@ -281,41 +417,31 @@ pub async fn scrape_html_profile(client: &reqwest::Client, steam_id: &str, data:
             data.level = level;
         }
     }
+}
 
-    let games = regex_extract(
-        &html,
-        r"(?s)Games.*?profile_count_link_total[^>]*>\s*([\d,]+)",
+fn parse_html_regex(html: &str, data: &mut AccountData) {
+    assign_non_empty(
+        &mut data.games_count,
+        regex_extract(html, r"(?s)Games.*?profile_count_link_total[^>]*>\s*([\d,]+)"),
     );
-    if !games.is_empty() {
-        data.games_count = games;
-    }
 
-    let friends = regex_extract(
-        &html,
-        r"(?s)Friends.*?profile_count_link_total[^>]*>\s*([\d,]+)",
+    assign_non_empty(
+        &mut data.friends_count,
+        regex_extract(html, r"(?s)Friends.*?profile_count_link_total[^>]*>\s*([\d,]+)"),
     );
-    if !friends.is_empty() {
-        data.friends_count = friends;
-    }
 
-    let inventory = regex_extract(
-        &html,
-        r"(?s)Inventory.*?profile_count_link_total[^>]*>\s*([\d,]+)",
+    assign_non_empty(
+        &mut data.inventory_steam,
+        regex_extract(html, r"(?s)Inventory.*?profile_count_link_total[^>]*>\s*([\d,]+)"),
     );
-    if !inventory.is_empty() {
-        data.inventory_steam = inventory;
-    }
 
-    let badges = regex_extract(
-        &html,
-        r"(?s)Badges.*?profile_count_link_total[^>]*>\s*([\d,]+)",
+    assign_non_empty(
+        &mut data.badges,
+        regex_extract(html, r"(?s)Badges.*?profile_count_link_total[^>]*>\s*([\d,]+)"),
     );
-    if !badges.is_empty() {
-        data.badges = badges;
-    }
 
     if html.contains("profile_ban_status")
-        && !regex_extract(&html, r"(?si)profile_ban.*?(community ban)").is_empty()
+        && !regex_extract(html, r"(?si)profile_ban.*?(community ban)").is_empty()
     {
         data.community_ban = "✗".into();
     }
@@ -330,25 +456,40 @@ pub async fn scrape_store_account(client: &reqwest::Client, data: &mut AccountDa
         return;
     }
 
-    let email = regex_extract(
-        &html,
-        r#"(?s)account_setting_sub_block.*?([a-zA-Z0-9_.+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"#,
-    );
-    if !email.is_empty() {
-        data.email = email;
-    }
+    parse_store_account_balance(&html, data);
+    parse_store_account_settings(&html, data);
+}
 
-    let wallet = regex_extract(&html, r#"(?s)header_wallet_balance[^>]*>\s*([^<]+)"#);
+fn parse_store_account_balance(html: &str, data: &mut AccountData) {
+    let wallet = regex_extract(html, r#"(?s)header_wallet_balance[^>]*>\s*([^<]+)"#);
     if !wallet.is_empty() {
         data.wallet_balance = wallet;
     } else {
         let alt = regex_extract(
-            &html,
+            html,
             r#"(?s)accountBalance[^>]*>.*?(\$[\d,.]+|[\d,.]+\s*USD)"#,
         );
-        if !alt.is_empty() {
-            data.wallet_balance = alt;
-        }
+        assign_non_empty(&mut data.wallet_balance, alt);
+    }
+}
+
+fn parse_store_account_settings(html: &str, data: &mut AccountData) {
+    assign_non_empty(
+        &mut data.email,
+        regex_extract(
+            html,
+            r#"(?s)account_setting_sub_block.*?([a-zA-Z0-9_.+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"#,
+        ),
+    );
+
+    assign_non_empty(
+        &mut data.country,
+        regex_extract(html, r#"store_country[^"]*"[^"]*value="([^"]+)"#),
+    );
+
+    let phone = regex_extract(html, r#"(?s)phone.*?account_data_field[^>]*>\s*([^<]+)"#);
+    if !phone.is_empty() {
+        data.phone = phone.trim().to_string();
     }
 
     if html.contains("Mobile Authenticator") || html.contains("phone_verified") {
@@ -370,16 +511,6 @@ pub async fn scrape_store_account(client: &reqwest::Client, data: &mut AccountDa
         data.family_view = "Enabled".into();
     } else {
         data.family_view = "—".into();
-    }
-
-    let country = regex_extract(&html, r#"store_country[^"]*"[^"]*value="([^"]+)"#);
-    if !country.is_empty() {
-        data.country = country;
-    }
-
-    let phone = regex_extract(&html, r#"(?s)phone.*?account_data_field[^>]*>\s*([^<]+)"#);
-    if !phone.is_empty() {
-        data.phone = phone.trim().to_string();
     }
 }
 

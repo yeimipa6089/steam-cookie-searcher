@@ -102,17 +102,13 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
     draw_footer(f, app, root[2]);
 
     match app.mode {
-        AppMode::SelectCookiesMethod => draw_select_cookies_popup(f, app, area),
+        AppMode::SelectCookiesMethod => draw_select_popup(f, app, area, " Load Cookies "),
 
-        AppMode::SelectProxiesMethod => draw_select_proxies_popup(f, app, area),
+        AppMode::SelectProxiesMethod => draw_select_popup(f, app, area, " Load Proxies "),
 
-        AppMode::InputPath => draw_input_popup(f, app, area),
+        AppMode::InputPath => draw_text_input_popup(f, app, area, " Enter Cookies File Path "),
 
-        AppMode::PasteText => draw_paste_popup(f, app, area),
-
-        AppMode::InputProxyPath => draw_proxy_path_popup(f, app, area),
-
-        AppMode::PasteProxyText => draw_proxy_paste_popup(f, app, area),
+        AppMode::InputProxyPath => draw_text_input_popup(f, app, area, " Enter Proxies File Path "),
 
         _ => {}
     }
@@ -512,7 +508,7 @@ fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn draw_select_cookies_popup(f: &mut Frame, _app: &mut App, area: Rect) {
+fn draw_select_popup(f: &mut Frame, _app: &mut App, area: Rect, title: &str) {
     let popup = centered_rect(30, 4, area);
 
     f.render_widget(Clear, popup);
@@ -520,7 +516,7 @@ fn draw_select_cookies_popup(f: &mut Frame, _app: &mut App, area: Rect) {
 
     let block = Block::default()
         .title(Span::styled(
-            " Load Cookies ",
+            title,
             Style::default().fg(ACCENT_1),
         ))
         .borders(Borders::ALL)
@@ -541,7 +537,7 @@ fn draw_select_cookies_popup(f: &mut Frame, _app: &mut App, area: Rect) {
                 "  [2] ",
                 Style::default().fg(ACCENT_1).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Paste text", Style::default().fg(TEXT_NORM)),
+            Span::styled("From clipboard", Style::default().fg(TEXT_NORM)),
         ]),
     ];
 
@@ -550,45 +546,7 @@ fn draw_select_cookies_popup(f: &mut Frame, _app: &mut App, area: Rect) {
     f.render_widget(p, popup);
 }
 
-fn draw_select_proxies_popup(f: &mut Frame, _app: &mut App, area: Rect) {
-    let popup = centered_rect(30, 4, area);
-
-    f.render_widget(Clear, popup);
-    f.render_widget(Block::default().style(Style::default().bg(BG_COLOR)), popup);
-
-    let block = Block::default()
-        .title(Span::styled(
-            " Load Proxies ",
-            Style::default().fg(ACCENT_1),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT_1))
-        .style(Style::default().bg(BG_COLOR));
-
-    let text = vec![
-        Line::from(vec![
-            Span::styled(
-                "  [1] ",
-                Style::default().fg(ACCENT_1).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("From file path", Style::default().fg(TEXT_NORM)),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  [2] ",
-                Style::default().fg(ACCENT_1).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Paste text", Style::default().fg(TEXT_NORM)),
-        ]),
-    ];
-
-    let p = Paragraph::new(text).block(block);
-
-    f.render_widget(p, popup);
-}
-
-fn draw_input_popup(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_text_input_popup(f: &mut Frame, app: &mut App, area: Rect, title: &str) {
     let popup = centered_rect(60, 3, area);
 
     f.render_widget(Clear, popup);
@@ -596,7 +554,7 @@ fn draw_input_popup(f: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .title(Span::styled(
-            " Enter Cookies File Path ",
+            title,
             Style::default().fg(ACCENT_1),
         ))
         .borders(Borders::ALL)
@@ -605,73 +563,6 @@ fn draw_input_popup(f: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(BG_COLOR));
 
     let p = Paragraph::new(app.input_buffer.as_str()).block(block);
-
-    f.render_widget(p, popup);
-}
-
-fn draw_proxy_path_popup(f: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(60, 3, area);
-
-    f.render_widget(Clear, popup);
-    f.render_widget(Block::default().style(Style::default().bg(BG_COLOR)), popup);
-
-    let block = Block::default()
-        .title(Span::styled(
-            " Enter Proxies File Path ",
-            Style::default().fg(ACCENT_1),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT_1))
-        .style(Style::default().bg(BG_COLOR));
-
-    let p = Paragraph::new(app.input_buffer.as_str()).block(block);
-
-    f.render_widget(p, popup);
-}
-
-fn draw_paste_popup(f: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(60, 12, area);
-
-    f.render_widget(Clear, popup);
-    f.render_widget(Block::default().style(Style::default().bg(BG_COLOR)), popup);
-
-    let block = Block::default()
-        .title(Span::styled(
-            " Paste Cookies Text (Ctrl+V) / ESC to finish ",
-            Style::default().fg(ACCENT_1),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT_1))
-        .style(Style::default().bg(BG_COLOR));
-
-    let p = Paragraph::new(app.input_buffer.as_str())
-        .wrap(Wrap { trim: false })
-        .block(block);
-
-    f.render_widget(p, popup);
-}
-
-fn draw_proxy_paste_popup(f: &mut Frame, app: &mut App, area: Rect) {
-    let popup = centered_rect(60, 12, area);
-
-    f.render_widget(Clear, popup);
-    f.render_widget(Block::default().style(Style::default().bg(BG_COLOR)), popup);
-
-    let block = Block::default()
-        .title(Span::styled(
-            " Paste Proxies Text (Ctrl+V) / ESC to finish ",
-            Style::default().fg(ACCENT_1),
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT_1))
-        .style(Style::default().bg(BG_COLOR));
-
-    let p = Paragraph::new(app.input_buffer.as_str())
-        .wrap(Wrap { trim: false })
-        .block(block);
 
     f.render_widget(p, popup);
 }
