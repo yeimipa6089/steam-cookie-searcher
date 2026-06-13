@@ -10,8 +10,65 @@ pub async fn open_browser_session(
     proxy_url: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _ = tx.send("Launching headless Chromium instance...".into());
-    let mut caps = DesiredCapabilities::chrome();
+    let caps = build_chrome_capabilities(proxy_url)?;
 
+    kill_existing_chromedriver();
+    let driver_process = start_chromedriver();
+
+    if driver_process.is_some() {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    let driver = match WebDriver::new("http://localhost:9515", caps).await {
+        Ok(d) => d,
+        Err(e) => {
+            if let Some(mut child) = driver_process {
+                let _ = child.kill();
+            }
+            return Err(e.into());
+        }
+    };
+
+    let _ = tx.send("Refreshing session tokens via reqwest...".into());
+    let fresh_cookies = refresh_session_tokens(cookies, proxy_url).await;
+
+    let _ = tx.send("Injecting fresh session into browser...".into());
+    let injected = inject_cookies_into_browser(&driver, cookies, &fresh_cookies).await;
+
+    let _ = tx.send(format!(
+        "Injected {} cookies, setting up session...",
+        injected
+    ));
+
+    driver.goto("https://login.steampowered.com/jwt/refresh?redir=https%3A%2F%2Fsteamcommunity.com%2Fmy%2Fprofile").await?;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let browser_cookies = driver.get_all_cookies().await?;
+    setup_local_storage(&driver, &browser_cookies).await;
+
+    driver.goto("https://steamcommunity.com/my/profile").await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let final_url = driver.current_url().await?.to_string();
+    let logged_in = !final_url.contains("login");
+
+    if logged_in {
+        let _ = tx.send("Browser session active — logged in!".into());
+    } else {
+        let _ = tx.send("Cookies injected but Steam rejected session.".into());
+    }
+
+    let _ = tx.send("Browser is open. Close the TUI app to terminate.".into());
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
+}
+
+fn build_chrome_capabilities(
+    proxy_url: Option<&str>,
+) -> Result<thirtyfour::ChromeCapabilities, Box<dyn std::error::Error>> {
+    let mut caps = DesiredCapabilities::chrome();
     caps.add_arg("--no-sandbox")?;
     caps.add_arg("--disable-dev-shm-usage")?;
     caps.add_arg("--log-level=3")?;
@@ -50,7 +107,10 @@ pub async fn open_browser_session(
             break;
         }
     }
+    Ok(caps)
+}
 
+fn kill_existing_chromedriver() {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -71,17 +131,20 @@ pub async fn open_browser_session(
             .spawn()
             .and_then(|mut c| c.wait());
     }
+}
 
+fn start_chromedriver() -> Option<std::process::Child> {
     let mut driver_cmd = if cfg!(windows) {
         std::process::Command::new("./chromedriver.exe")
     } else {
         std::process::Command::new("./chromedriver")
     };
 
-    driver_cmd.arg("--port=9515")
-              .arg("--silent")
-              .stdout(std::process::Stdio::null())
-              .stderr(std::process::Stdio::null());
+    driver_cmd
+        .arg("--port=9515")
+        .arg("--silent")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
 
     #[cfg(windows)]
     {
@@ -89,24 +152,13 @@ pub async fn open_browser_session(
         driver_cmd.creation_flags(0x08000008);
     }
 
-    let driver_process = driver_cmd.spawn().ok();
+    driver_cmd.spawn().ok()
+}
 
-    if driver_process.is_some() {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-
-    let driver = match WebDriver::new("http://localhost:9515", caps).await {
-        Ok(d) => d,
-        Err(e) => {
-            if let Some(mut child) = driver_process {
-                let _ = child.kill();
-            }
-            return Err(e.into());
-        }
-    };
-
-    let _ = tx.send("Refreshing session tokens via reqwest...".into());
-
+async fn refresh_session_tokens(
+    cookies: &[SteamCookie],
+    proxy_url: Option<&str>,
+) -> Vec<(String, String, String)> {
     let jar = Arc::new(reqwest::cookie::Jar::default());
     let domains = [
         "https://steamcommunity.com",
@@ -162,9 +214,14 @@ pub async fn open_browser_session(
             }
         }
     }
+    fresh_cookies
+}
 
-    let _ = tx.send("Injecting fresh session into browser...".into());
-
+async fn inject_cookies_into_browser(
+    driver: &WebDriver,
+    cookies: &[SteamCookie],
+    fresh_cookies: &[(String, String, String)],
+) -> usize {
     let target_domains = [
         "steamcommunity.com",
         "store.steampowered.com",
@@ -183,7 +240,7 @@ pub async fn open_browser_session(
 
         let _ = driver.delete_all_cookies().await;
 
-        for (cookie_domain, name, value) in &fresh_cookies {
+        for (cookie_domain, name, value) in fresh_cookies {
             let cd_clean = cookie_domain.trim_start_matches('.');
             if domain.ends_with(cd_clean) || cd_clean.ends_with(*domain) {
                 let mut c = thirtyfour::Cookie::new(name.clone(), value.clone());
@@ -217,19 +274,13 @@ pub async fn open_browser_session(
             }
         }
     }
+    injected
+}
 
-    let _ = tx.send(format!(
-        "Injected {} cookies, setting up session...",
-        injected
-    ));
-
-    driver.goto("https://login.steampowered.com/jwt/refresh?redir=https%3A%2F%2Fsteamcommunity.com%2Fmy%2Fprofile").await?;
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    let browser_cookies = driver.get_all_cookies().await?;
+async fn setup_local_storage(driver: &WebDriver, browser_cookies: &[thirtyfour::Cookie]) {
     let mut login_secure_val = String::new();
     let mut session_id_val = String::new();
-    for cookie in &browser_cookies {
+    for cookie in browser_cookies {
         if cookie.name == "steamLoginSecure" {
             login_secure_val = cookie.value.clone();
         }
@@ -259,23 +310,5 @@ pub async fn open_browser_session(
                 let _ = driver.execute(&ls_script, vec![]).await;
             }
         }
-    }
-
-    driver.goto("https://steamcommunity.com/my/profile").await?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    let final_url = driver.current_url().await?.to_string();
-    let logged_in = !final_url.contains("login");
-
-    if logged_in {
-        let _ = tx.send("Browser session active — logged in!".into());
-    } else {
-        let _ = tx.send("Cookies injected but Steam rejected session.".into());
-    }
-
-    let _ = tx.send("Browser is open. Close the TUI app to terminate.".into());
-
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
     }
 }

@@ -149,6 +149,7 @@ Interact with the TUI using the following controls:
 - <kbd>Tab</kbd> : Switch between the `Data` panel and the `Network` inspector.
 - <kbd>Enter</kbd> : View detailed breakdown of a selected row.
 - <kbd>E</kbd> : Export valid sessions to disk.
+- <kbd>I</kbd> : Import accounts from `accounts_export.json`.
 - <kbd>Esc</kbd> : Go back or exit.
 
 ---

@@ -6,17 +6,23 @@ use regex::Regex;
 use scraper::{Html, Selector};
 
 fn parse_wallet_amounts(wallet: &serde_json::Value) -> (u64, u64, u64) {
-    let amount = wallet.get("amount").and_then(|v| {
-        v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-    }).unwrap_or(0);
-    
+    let amount = wallet
+        .get("amount")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+        })
+        .unwrap_or(0);
+
     let delayed = wallet
         .get("balance_delayed")
         .or_else(|| wallet.get("delayed_balance"))
         .or_else(|| wallet.get("balance_pending"))
         .and_then(|v| {
-            v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-        }).unwrap_or(0);
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+        })
+        .unwrap_or(0);
 
     let currency_code = wallet.get("currency").and_then(|v| v.as_u64()).unwrap_or(0);
 
@@ -26,9 +32,13 @@ fn parse_wallet_amounts(wallet: &serde_json::Value) -> (u64, u64, u64) {
 pub async fn fetch_fundwalletinfo(client: &reqwest::Client, data: &mut AccountData) -> bool {
     let url = "https://store.steampowered.com/api/getfundwalletinfo/?l=english";
     if let Some(json) = fetch_json(client, url).await {
-        let country_code = json.get("country_code").and_then(|v| v.as_str()).unwrap_or("");
-        
-        let (amount, delayed, currency_code) = json.get("user_wallet")
+        let country_code = json
+            .get("country_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let (amount, delayed, currency_code) = json
+            .get("user_wallet")
             .map(parse_wallet_amounts)
             .unwrap_or((0, 0, 0));
 
@@ -36,14 +46,19 @@ pub async fn fetch_fundwalletinfo(client: &reqwest::Client, data: &mut AccountDa
         let balance_main = amount as f64 / 100.0;
         let usd_rate = get_usd_rate(currency);
         let usd_equiv = balance_main * usd_rate;
-        
+
         let formatted = format!("{:.2} {} (USD {:.2})", balance_main, currency, usd_equiv);
         if data.wallet_balance == "—" || data.wallet_balance.is_empty() {
             data.wallet_balance = formatted;
         }
 
         let hold_main = delayed as f64 / 100.0;
-        data.hold_balance = format!("{:.2} {} (USD {:.2})", hold_main, currency, hold_main * usd_rate);
+        data.hold_balance = format!(
+            "{:.2} {} (USD {:.2})",
+            hold_main,
+            currency,
+            hold_main * usd_rate
+        );
         data.inventory_balance = format!("0.00 {} (USD 0.00)", currency);
 
         if !country_code.is_empty() {
@@ -55,6 +70,15 @@ pub async fn fetch_fundwalletinfo(client: &reqwest::Client, data: &mut AccountDa
 }
 
 fn get_currency_string(code: u64, country_code: &str) -> &'static str {
+    let currency_by_code = get_currency_from_code(code);
+    if currency_by_code != "UNKNOWN" {
+        currency_by_code
+    } else {
+        get_currency_from_country(country_code)
+    }
+}
+
+fn get_currency_from_code(code: u64) -> &'static str {
     match code {
         1 => "USD",
         2 => "GBP",
@@ -95,88 +119,52 @@ fn get_currency_string(code: u64, country_code: &str) -> &'static str {
         39 => "QAR",
         66 => "CRC",
         67 => "UYU",
-        0 => match country_code {
-            "GB" | "UK" => "GBP",
-            "ES" | "DE" | "FR" | "IT" | "NL" | "BE" | "AT" | "IE" | "FI" | "PT" | "GR" | "EE" | "LV" | "LT" | "SK" | "SI" | "CY" | "MT" => "EUR",
-            "CH" | "LI" => "CHF",
-            "RU" => "RUB",
-            "PL" => "PLN",
-            "BR" => "BRL",
-            "JP" => "JPY",
-            "NO" => "NOK",
-            "ID" => "IDR",
-            "MY" => "MYR",
-            "PH" => "PHP",
-            "SG" => "SGD",
-            "TH" => "THB",
-            "VN" => "VND",
-            "KR" => "KRW",
-            "TR" => "TRY",
-            "UA" => "UAH",
-            "MX" => "MXN",
-            "CA" => "CAD",
-            "AU" => "AUD",
-            "NZ" => "NZD",
-            "CN" => "CNY",
-            "IN" => "INR",
-            "CL" => "CLP",
-            "PE" => "PEN",
-            "CO" => "COP",
-            "ZA" => "ZAR",
-            "HK" => "HKD",
-            "TW" => "TWD",
-            "SA" => "SAR",
-            "AE" => "AED",
-            "AR" => "ARS",
-            "IL" => "ILS",
-            "KZ" => "KZT",
-            "KW" => "KWD",
-            "QA" => "QAR",
-            "CR" => "CRC",
-            "UY" => "UYU",
-            _ => "USD",
-        },
-        _ => match country_code {
-            "GB" | "UK" => "GBP",
-            "ES" | "DE" | "FR" | "IT" | "NL" | "BE" | "AT" | "IE" | "FI" | "PT" | "GR" | "EE" | "LV" | "LT" | "SK" | "SI" | "CY" | "MT" => "EUR",
-            "CH" | "LI" => "CHF",
-            "RU" => "RUB",
-            "PL" => "PLN",
-            "BR" => "BRL",
-            "JP" => "JPY",
-            "NO" => "NOK",
-            "ID" => "IDR",
-            "MY" => "MYR",
-            "PH" => "PHP",
-            "SG" => "SGD",
-            "TH" => "THB",
-            "VN" => "VND",
-            "KR" => "KRW",
-            "TR" => "TRY",
-            "UA" => "UAH",
-            "MX" => "MXN",
-            "CA" => "CAD",
-            "AU" => "AUD",
-            "NZ" => "NZD",
-            "CN" => "CNY",
-            "IN" => "INR",
-            "CL" => "CLP",
-            "PE" => "PEN",
-            "CO" => "COP",
-            "ZA" => "ZAR",
-            "HK" => "HKD",
-            "TW" => "TWD",
-            "SA" => "SAR",
-            "AE" => "AED",
-            "AR" => "ARS",
-            "IL" => "ILS",
-            "KZ" => "KZT",
-            "KW" => "KWD",
-            "QA" => "QAR",
-            "CR" => "CRC",
-            "UY" => "UYU",
-            _ => "USD",
-        },
+        _ => "UNKNOWN",
+    }
+}
+
+fn get_currency_from_country(country_code: &str) -> &'static str {
+    match country_code {
+        "GB" | "UK" => "GBP",
+        "ES" | "DE" | "FR" | "IT" | "NL" | "BE" | "AT" | "IE" | "FI" | "PT" | "GR" | "EE"
+        | "LV" | "LT" | "SK" | "SI" | "CY" | "MT" => "EUR",
+        "CH" | "LI" => "CHF",
+        "RU" => "RUB",
+        "PL" => "PLN",
+        "BR" => "BRL",
+        "JP" => "JPY",
+        "NO" => "NOK",
+        "ID" => "IDR",
+        "MY" => "MYR",
+        "PH" => "PHP",
+        "SG" => "SGD",
+        "TH" => "THB",
+        "VN" => "VND",
+        "KR" => "KRW",
+        "TR" => "TRY",
+        "UA" => "UAH",
+        "MX" => "MXN",
+        "CA" => "CAD",
+        "AU" => "AUD",
+        "NZ" => "NZD",
+        "CN" => "CNY",
+        "IN" => "INR",
+        "CL" => "CLP",
+        "PE" => "PEN",
+        "CO" => "COP",
+        "ZA" => "ZAR",
+        "HK" => "HKD",
+        "TW" => "TWD",
+        "SA" => "SAR",
+        "AE" => "AED",
+        "AR" => "ARS",
+        "IL" => "ILS",
+        "KZ" => "KZT",
+        "KW" => "KWD",
+        "QA" => "QAR",
+        "CR" => "CRC",
+        "UY" => "UYU",
+        _ => "USD",
     }
 }
 
@@ -422,22 +410,34 @@ fn parse_html_dom(html: &str, data: &mut AccountData) {
 fn parse_html_regex(html: &str, data: &mut AccountData) {
     assign_non_empty(
         &mut data.games_count,
-        regex_extract(html, r"(?s)Games.*?profile_count_link_total[^>]*>\s*([\d,]+)"),
+        regex_extract(
+            html,
+            r"(?s)Games.*?profile_count_link_total[^>]*>\s*([\d,]+)",
+        ),
     );
 
     assign_non_empty(
         &mut data.friends_count,
-        regex_extract(html, r"(?s)Friends.*?profile_count_link_total[^>]*>\s*([\d,]+)"),
+        regex_extract(
+            html,
+            r"(?s)Friends.*?profile_count_link_total[^>]*>\s*([\d,]+)",
+        ),
     );
 
     assign_non_empty(
         &mut data.inventory_steam,
-        regex_extract(html, r"(?s)Inventory.*?profile_count_link_total[^>]*>\s*([\d,]+)"),
+        regex_extract(
+            html,
+            r"(?s)Inventory.*?profile_count_link_total[^>]*>\s*([\d,]+)",
+        ),
     );
 
     assign_non_empty(
         &mut data.badges,
-        regex_extract(html, r"(?s)Badges.*?profile_count_link_total[^>]*>\s*([\d,]+)"),
+        regex_extract(
+            html,
+            r"(?s)Badges.*?profile_count_link_total[^>]*>\s*([\d,]+)",
+        ),
     );
 
     if html.contains("profile_ban_status")
@@ -492,6 +492,11 @@ fn parse_store_account_settings(html: &str, data: &mut AccountData) {
         data.phone = phone.trim().to_string();
     }
 
+    parse_store_guard_status(html, data);
+    parse_store_family_view(html, data);
+}
+
+fn parse_store_guard_status(html: &str, data: &mut AccountData) {
     if html.contains("Mobile Authenticator") || html.contains("phone_verified") {
         data.guard = "Mobile".into();
     } else if html.contains("Steam Guard") && html.contains("email") {
@@ -499,7 +504,9 @@ fn parse_store_account_settings(html: &str, data: &mut AccountData) {
     } else if html.contains("steamguard_icon") {
         data.guard = "Enabled".into();
     }
+}
 
+fn parse_store_family_view(html: &str, data: &mut AccountData) {
     if html.contains("parental_locked") || html.contains("parental_status_locked") {
         data.family_view = "✗ Locked".into();
     } else if html.contains("parental_unlocked") || html.contains("parental_status_unlocked") {

@@ -12,7 +12,9 @@ async fn parse_country_response(res: Result<reqwest::Response, reqwest::Error>) 
 
 pub async fn get_ip_country(ip: &str) -> String {
     let res = reqwest::get(&format!("https://get.geojs.io/v1/ip/country/{}.json", ip)).await;
-    parse_country_response(res).await.unwrap_or_else(|| "UNKNOWN".to_string())
+    parse_country_response(res)
+        .await
+        .unwrap_or_else(|| "UNKNOWN".to_string())
 }
 
 pub async fn check_proxy_geoip(proxy: String) -> Option<ProxyInfo> {
@@ -29,7 +31,10 @@ pub async fn check_proxy_geoip(proxy: String) -> Option<ProxyInfo> {
         .build()
         .ok()?;
 
-    let res = client.get("https://get.geojs.io/v1/ip/country.json").send().await;
+    let res = client
+        .get("https://get.geojs.io/v1/ip/country.json")
+        .send()
+        .await;
 
     parse_country_response(res).await.map(|cc| ProxyInfo {
         url: clean_proxy,

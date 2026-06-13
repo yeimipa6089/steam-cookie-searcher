@@ -103,12 +103,21 @@ pub fn draw_ui(f: &mut Frame, app: &mut App) {
 
     match app.mode {
         AppMode::SelectCookiesMethod => draw_select_popup(f, app, area, " Load Cookies "),
-
         AppMode::SelectProxiesMethod => draw_select_popup(f, app, area, " Load Proxies "),
-
         AppMode::InputPath => draw_text_input_popup(f, app, area, " Enter Cookies File Path "),
-
         AppMode::InputProxyPath => draw_text_input_popup(f, app, area, " Enter Proxies File Path "),
+        AppMode::PasteText => draw_textarea_popup(
+            f,
+            app,
+            area,
+            " Paste Cookies | Double Enter to submit / ESC to cancel ",
+        ),
+        AppMode::PasteProxyText => draw_textarea_popup(
+            f,
+            app,
+            area,
+            " Paste Proxies | Double Enter to submit / ESC to cancel ",
+        ),
 
         _ => {}
     }
@@ -430,18 +439,36 @@ fn draw_logs(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
-    let _current_tab = if app.active_tab == crate::cli::app::AppTab::Network {
-        "Network"
-    } else {
-        "Main"
-    };
     let other_tab = if app.active_tab == crate::cli::app::AppTab::Network {
         "Main"
     } else {
         "Network"
     };
 
-    let keys = if app.active_tab == crate::cli::app::AppTab::Network {
+    let keys = get_key_hints(app, other_tab);
+
+    let mut spans = vec![];
+    for (k, v) in keys {
+        spans.push(Span::styled(
+            format!(" [{}] ", k),
+            Style::default().fg(ACCENT_1).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!("{}  ", v),
+            Style::default().fg(TEXT_NORM),
+        ));
+    }
+
+    let footer = Paragraph::new(Line::from(spans))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
+        .block(Block::default().borders(Borders::NONE));
+
+    f.render_widget(footer, area);
+}
+
+fn get_key_hints(app: &App, other_tab: &str) -> Vec<(&'static str, String)> {
+    if app.active_tab == crate::cli::app::AppTab::Network {
         vec![
             ("Tab", format!("Switch to {}", other_tab)),
             ("\u{2191}/\u{2193}", "Select Request".to_string()),
@@ -466,26 +493,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
         }
         v.push(("q", "Quit".to_string()));
         v
-    };
-
-    let mut spans = vec![];
-    for (k, v) in keys {
-        spans.push(Span::styled(
-            format!(" [{}] ", k),
-            Style::default().fg(ACCENT_1).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!("{}  ", v),
-            Style::default().fg(TEXT_NORM),
-        ));
     }
-
-    let footer = Paragraph::new(Line::from(spans))
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::NONE));
-
-    f.render_widget(footer, area);
 }
 
 fn centered_rect(width: u16, height: u16, r: Rect) -> Rect {
@@ -515,10 +523,7 @@ fn draw_select_popup(f: &mut Frame, _app: &mut App, area: Rect, title: &str) {
     f.render_widget(Block::default().style(Style::default().bg(BG_COLOR)), popup);
 
     let block = Block::default()
-        .title(Span::styled(
-            title,
-            Style::default().fg(ACCENT_1),
-        ))
+        .title(Span::styled(title, Style::default().fg(ACCENT_1)))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(ACCENT_1))
@@ -537,7 +542,7 @@ fn draw_select_popup(f: &mut Frame, _app: &mut App, area: Rect, title: &str) {
                 "  [2] ",
                 Style::default().fg(ACCENT_1).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("From clipboard", Style::default().fg(TEXT_NORM)),
+            Span::styled("Paste Text", Style::default().fg(TEXT_NORM)),
         ]),
     ];
 
@@ -553,10 +558,7 @@ fn draw_text_input_popup(f: &mut Frame, app: &mut App, area: Rect, title: &str) 
     f.render_widget(Block::default().style(Style::default().bg(BG_COLOR)), popup);
 
     let block = Block::default()
-        .title(Span::styled(
-            title,
-            Style::default().fg(ACCENT_1),
-        ))
+        .title(Span::styled(title, Style::default().fg(ACCENT_1)))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(ACCENT_1))
@@ -567,38 +569,63 @@ fn draw_text_input_popup(f: &mut Frame, app: &mut App, area: Rect, title: &str) 
     f.render_widget(p, popup);
 }
 
+fn draw_textarea_popup(f: &mut Frame, app: &mut App, area: Rect, title: &str) {
+    let popup = centered_rect(60, 12, area);
+
+    f.render_widget(Clear, popup);
+    f.render_widget(Block::default().style(Style::default().bg(BG_COLOR)), popup);
+
+    let block = Block::default()
+        .title(Span::styled(title, Style::default().fg(ACCENT_1)))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT_1))
+        .style(Style::default().bg(BG_COLOR));
+
+    let p = Paragraph::new(app.input_buffer.as_str())
+        .block(block)
+        .wrap(ratatui::widgets::Wrap { trim: false });
+
+    f.render_widget(p, popup);
+}
+
 fn colorize_val(val: &str) -> Span<'static> {
+    let clean_val = strip_ansi_codes(val);
+
+    if clean_val.is_empty() || clean_val == "-" || clean_val == "—" {
+        return Span::styled("—", Style::default().fg(TEXT_DIM));
+    }
+
+    let color = determine_value_color(&clean_val);
+    Span::styled(clean_val, Style::default().fg(color))
+}
+
+fn strip_ansi_codes(val: &str) -> String {
     let mut clean_val = val.to_string();
     if clean_val.contains("[32m") || clean_val.contains("[0m") || clean_val.contains("[31m") {
         clean_val = clean_val
             .replace("\x1b[32m", "")
             .replace("\x1b[0m", "")
-            .replace("\x1b[31m", "");
-        clean_val = clean_val
+            .replace("\x1b[31m", "")
             .replace("[32m", "")
             .replace("[0m", "")
             .replace("[31m", "");
     }
+    clean_val
+}
 
-    if clean_val.is_empty() || clean_val == "-" || clean_val == "—" {
-        return Span::styled("—", Style::default().fg(TEXT_DIM));
-    }
+fn determine_value_color(clean_val: &str) -> Color {
     let lower = clean_val.to_lowercase();
-    if lower == "clean"
-        || lower == "unrestricted"
-        || lower == "linked"
-        || lower == "prime"
-        || lower == "active"
-    {
-        Span::styled(clean_val, Style::default().fg(OK_COLOR))
+    if ["clean", "unrestricted", "linked", "prime", "active"].contains(&lower.as_str()) {
+        OK_COLOR
     } else if lower.contains("disabled")
         || lower.contains("banned")
         || lower.contains("limited")
         || lower.contains("unlinked")
     {
-        Span::styled(clean_val, Style::default().fg(ERR_COLOR))
+        ERR_COLOR
     } else if lower.contains("private") || lower.contains("empty") || lower.contains("non-prime") {
-        Span::styled(clean_val, Style::default().fg(TEXT_DIM))
+        TEXT_DIM
     } else if clean_val.contains("CHF")
         || clean_val.contains("$")
         || clean_val.contains("€")
@@ -606,9 +633,9 @@ fn colorize_val(val: &str) -> Span<'static> {
         || clean_val.contains("₽")
         || clean_val.contains("£")
     {
-        Span::styled(clean_val, Style::default().fg(OK_COLOR))
+        OK_COLOR
     } else {
-        Span::styled(clean_val, Style::default().fg(TEXT_NORM))
+        TEXT_NORM
     }
 }
 
@@ -993,11 +1020,11 @@ fn draw_network_tab(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(i, r)| {
             let is_sel = i == selected_idx;
             let method_color = match r.method.as_str() {
-                "GET" => Color::LightBlue,
-                "POST" => Color::LightYellow,
-                "PUT" => Color::LightCyan,
-                "DELETE" => Color::LightRed,
-                _ => Color::Gray,
+                "GET" => OK_COLOR,
+                "POST" => WARN_COLOR,
+                "PUT" | "PATCH" => Color::Rgb(120, 160, 210),
+                "DELETE" => ERR_COLOR,
+                _ => TEXT_DIM,
             };
 
             let mut spans = vec![];

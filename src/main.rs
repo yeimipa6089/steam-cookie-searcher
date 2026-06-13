@@ -38,35 +38,51 @@ async fn load_proxies_from_path(
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
         {
-            let file = std::fs::File::open(path)?;
-            let mut archive = zip::ZipArchive::new(file)?;
-            for i in 0..archive.len() {
-                let mut file = archive.by_index(i)?;
-                if file.is_file() {
-                    let mut contents = String::new();
-                    use std::io::Read;
-                    if file.read_to_string(&mut contents).is_ok() {
-                        list.extend(parse_proxies_from_text(&contents));
-                    }
-                }
-            }
+            list.extend(load_proxies_from_zip(path)?);
         } else {
             let content = tokio::fs::read_to_string(path).await?;
             list.extend(parse_proxies_from_text(&content));
         }
     } else if metadata.is_dir() {
-        let mut entries = tokio::fs::read_dir(path).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let entry_path = entry.path();
-            if entry_path.is_file()
-                && entry_path.extension().is_some_and(|ext| ext == "txt")
-                && let Ok(content) = tokio::fs::read_to_string(&entry_path).await
-            {
-                list.extend(parse_proxies_from_text(&content));
-            }
-        }
+        list.extend(load_proxies_from_dir(path).await?);
     } else {
         return Err("Invalid path".into());
+    }
+    Ok(list)
+}
+
+fn load_proxies_from_zip(
+    path: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut list = Vec::new();
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        if file.is_file() {
+            let mut contents = String::new();
+            use std::io::Read;
+            if file.read_to_string(&mut contents).is_ok() {
+                list.extend(parse_proxies_from_text(&contents));
+            }
+        }
+    }
+    Ok(list)
+}
+
+async fn load_proxies_from_dir(
+    path: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut list = Vec::new();
+    let mut entries = tokio::fs::read_dir(path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_path = entry.path();
+        if entry_path.is_file()
+            && entry_path.extension().is_some_and(|ext| ext == "txt")
+            && let Ok(content) = tokio::fs::read_to_string(&entry_path).await
+        {
+            list.extend(parse_proxies_from_text(&content));
+        }
     }
     Ok(list)
 }
@@ -111,6 +127,567 @@ fn load_accounts() -> Vec<crate::models::account::AccountData> {
 }
 
 use crate::models::network::NetworkRequest;
+
+fn handle_tui_events(
+    app: &mut App,
+    event: crossterm::event::Event,
+    log_tx: &mpsc::UnboundedSender<String>,
+    data_tx: &mpsc::UnboundedSender<crate::models::account::AccountData>,
+    proxy_tx: &mpsc::UnboundedSender<Vec<ProxyInfo>>,
+) {
+    match event {
+        Event::Paste(text) => {
+            if app.mode == AppMode::InputPath
+                || app.mode == AppMode::InputProxyPath
+                || app.mode == AppMode::PasteText
+                || app.mode == AppMode::PasteProxyText
+            {
+                app.input_buffer.push_str(&text);
+            }
+        }
+        Event::Mouse(mouse_event) => {
+            if app.mode == AppMode::Normal || app.mode == AppMode::Scanning {
+                match mouse_event.kind {
+                    crossterm::event::MouseEventKind::ScrollUp => {
+                        if app.active_tab == crate::cli::app::AppTab::System {
+                            let i = app
+                                .logs_state
+                                .selected()
+                                .unwrap_or(app.logs.len().saturating_sub(1));
+                            app.logs_state.select(Some(i.saturating_sub(1)));
+                        } else {
+                            app.network_scroll = app.network_scroll.saturating_sub(1);
+                        }
+                    }
+                    crossterm::event::MouseEventKind::ScrollDown => {
+                        if app.active_tab == crate::cli::app::AppTab::System {
+                            let i = app
+                                .logs_state
+                                .selected()
+                                .unwrap_or(app.logs.len().saturating_sub(1));
+                            app.logs_state
+                                .select(Some((i + 1).min(app.logs.len().saturating_sub(1))));
+                        } else {
+                            app.network_scroll = app.network_scroll.saturating_add(1);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            handle_key_events(app, key, log_tx, data_tx, proxy_tx);
+        }
+        _ => {}
+    }
+}
+
+fn handle_key_events(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    log_tx: &mpsc::UnboundedSender<String>,
+    data_tx: &mpsc::UnboundedSender<crate::models::account::AccountData>,
+    proxy_tx: &mpsc::UnboundedSender<Vec<ProxyInfo>>,
+) {
+    match app.mode {
+        AppMode::Normal | AppMode::Scanning => handle_normal_mode_keys(app, key, log_tx),
+        AppMode::SelectCookiesMethod => handle_cookie_method_keys(app, key, log_tx, data_tx),
+        AppMode::SelectProxiesMethod => handle_proxy_method_keys(app, key, log_tx, proxy_tx),
+        AppMode::InputPath => handle_input_path_keys(app, key, log_tx, data_tx),
+        AppMode::InputProxyPath => handle_input_proxy_path_keys(app, key, log_tx, proxy_tx),
+        AppMode::PasteText => handle_paste_cookies_keys(app, key, log_tx, data_tx),
+        AppMode::PasteProxyText => handle_paste_proxies_keys(app, key, log_tx, proxy_tx),
+    }
+}
+
+fn handle_normal_mode_keys(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    log_tx: &mpsc::UnboundedSender<String>,
+) {
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Tab => {
+            if app.active_tab == crate::cli::app::AppTab::System {
+                app.active_tab = crate::cli::app::AppTab::Network;
+            } else {
+                app.active_tab = crate::cli::app::AppTab::System;
+            }
+        }
+        KeyCode::Down => {
+            if app.active_tab == crate::cli::app::AppTab::Network {
+                if !app.network_requests.is_empty() {
+                    app.selected_network_request =
+                        (app.selected_network_request + 1) % app.network_requests.len();
+                    app.network_scroll = 0;
+                    app.network_state.select(Some(app.selected_network_request));
+                }
+            } else {
+                app.next_account();
+            }
+        }
+        KeyCode::Up => {
+            if app.active_tab == crate::cli::app::AppTab::Network {
+                if !app.network_requests.is_empty() {
+                    if app.selected_network_request > 0 {
+                        app.selected_network_request -= 1;
+                    } else {
+                        app.selected_network_request = app.network_requests.len() - 1;
+                    }
+                    app.network_scroll = 0;
+                    app.network_state.select(Some(app.selected_network_request));
+                }
+            } else {
+                app.prev_account();
+            }
+        }
+        KeyCode::Right => {
+            if app.active_tab == crate::cli::app::AppTab::Network {
+                app.network_inner_tab = match app.network_inner_tab {
+                    crate::cli::app::InnerNetworkTab::Headers => {
+                        crate::cli::app::InnerNetworkTab::Body
+                    }
+                    crate::cli::app::InnerNetworkTab::Body => {
+                        crate::cli::app::InnerNetworkTab::Cookies
+                    }
+                    crate::cli::app::InnerNetworkTab::Cookies => {
+                        crate::cli::app::InnerNetworkTab::Headers
+                    }
+                };
+                app.network_scroll = 0;
+            }
+        }
+        KeyCode::Left => {
+            if app.active_tab == crate::cli::app::AppTab::Network {
+                app.network_inner_tab = match app.network_inner_tab {
+                    crate::cli::app::InnerNetworkTab::Headers => {
+                        crate::cli::app::InnerNetworkTab::Cookies
+                    }
+                    crate::cli::app::InnerNetworkTab::Body => {
+                        crate::cli::app::InnerNetworkTab::Headers
+                    }
+                    crate::cli::app::InnerNetworkTab::Cookies => {
+                        crate::cli::app::InnerNetworkTab::Body
+                    }
+                };
+                app.network_scroll = 0;
+            }
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') => app.mode = AppMode::SelectCookiesMethod,
+        KeyCode::Char('p') | KeyCode::Char('P') => app.mode = AppMode::SelectProxiesMethod,
+        KeyCode::Char('o') | KeyCode::Char('O') => {
+            if !app.accounts.is_empty() {
+                let acc = &app.accounts[app.selected_account];
+                let cookies = acc.cookies.clone();
+                let tx = log_tx.clone();
+                let proxy = app.proxies.first().map(|p| p.url.clone());
+                tokio::spawn(async move {
+                    let proxy_ref = proxy.as_deref();
+                    if let Err(e) =
+                        crate::browser::cdp::open_browser_session(&cookies, &tx, proxy_ref).await
+                    {
+                        let _ = tx.send(format!("Browser error: {}", e));
+                    }
+                });
+            }
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') if !app.accounts.is_empty() => {
+            app.accounts.remove(app.selected_account);
+            if app.selected_account >= app.accounts.len() && app.selected_account > 0 {
+                app.selected_account -= 1;
+            }
+            app.account_state.select(Some(app.selected_account));
+            save_accounts(&app.accounts);
+        }
+        KeyCode::Char('e') | KeyCode::Char('E') => export_accounts(app),
+        KeyCode::Char('i') | KeyCode::Char('I') => import_accounts(app),
+        KeyCode::PageUp => {
+            let inner_h = 10;
+            if app.active_tab == crate::cli::app::AppTab::System {
+                let i = app
+                    .logs_state
+                    .selected()
+                    .unwrap_or(app.logs.len().saturating_sub(1));
+                app.logs_state.select(Some(i.saturating_sub(inner_h)));
+            } else if app.active_tab == crate::cli::app::AppTab::Network {
+                app.network_scroll = app.network_scroll.saturating_sub(inner_h);
+            }
+        }
+        KeyCode::PageDown => {
+            let inner_h = 10;
+            if app.active_tab == crate::cli::app::AppTab::System {
+                let i = app
+                    .logs_state
+                    .selected()
+                    .unwrap_or(app.logs.len().saturating_sub(1));
+                app.logs_state
+                    .select(Some((i + inner_h).min(app.logs.len().saturating_sub(1))));
+            } else if app.active_tab == crate::cli::app::AppTab::Network {
+                app.network_scroll += inner_h;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn export_accounts(app: &mut App) {
+    let _ = std::fs::create_dir_all("Export/Cookies");
+    let mut exported = 0;
+    for (i, acc) in app.accounts.iter().enumerate() {
+        let mut text = String::new();
+        text.push_str(&format!("Login: {}\n", acc.display("username")));
+        text.push_str(&format!("Profile: {}\n", acc.display("profile_url")));
+        text.push_str(&format!("Custom URL: {}\n", acc.display("custom_url")));
+        text.push_str(&format!("Steam ID: {}\n", acc.display("steam_id")));
+        text.push_str(&format!("Balance: {}\n", acc.display("wallet_balance")));
+        text.push_str(&format!("Hold Balance: {}\n", acc.display("hold_balance")));
+        text.push_str(&format!(
+            "Inventory Balance: {}\n",
+            acc.display("inventory_balance")
+        ));
+        text.push_str(&format!("Email: {}\n", acc.display("email")));
+        text.push_str(&format!("Phone: {}\n", acc.display("phone")));
+        text.push_str(&format!("Country: {}\n", acc.display("country")));
+        text.push_str(&format!("Family View: {}\n", acc.display("family_view")));
+        text.push_str(&format!("Created: {}\n", acc.display("created_date")));
+        text.push_str(&format!("Guard: {}\n", acc.display("guard")));
+        text.push_str(&format!("Level: {}\n", acc.display("level")));
+        text.push_str(&format!("Points: {}\n", acc.display("steam_points")));
+        text.push_str(&format!(
+            "Community Status: {}\n",
+            acc.display("community_ban")
+        ));
+        text.push_str(&format!("Trade Ban: {}\n", acc.display("trade_ban")));
+        text.push_str(&format!("Account Type: {}\n", acc.display("account_type")));
+        text.push_str(&format!("Market Status: {}\n", acc.display("market")));
+        text.push_str(&format!(
+            "Active Lots For Sale: {}\n",
+            acc.display("market_active_listings")
+        ));
+        text.push_str(&format!("VAC Status: {}\n", acc.display("vac")));
+        text.push_str(&format!("CS Prime: {}\n", acc.display("cs_prime")));
+        text.push_str(&format!("SIH Link: {}\n", acc.display("sih_link")));
+        text.push_str(&format!("Games: {}\n", acc.display("games_count")));
+        text.push_str(&format!("Hours Played: {}\n", acc.display("hours_played")));
+        text.push_str(&format!("Friends: {}\n", acc.display("friends_count")));
+        text.push_str(&format!("Wishlist: {}\n", acc.display("wishlist_count")));
+        text.push_str(&format!(
+            "Active Sales: {}\n",
+            acc.display("active_sales_count")
+        ));
+        text.push_str(&format!("Badges: {}\n", acc.display("badges_count")));
+        text.push_str("\n----- Game Inventories -----\n");
+        text.push_str(&format!("CS2: {}\n", acc.display("inv_cs2")));
+        text.push_str(&format!("Dota 2: {}\n", acc.display("inv_dota2")));
+        text.push_str(&format!("TF2: {}\n", acc.display("inv_tf2")));
+        text.push_str(&format!("PUBG: {}\n", acc.display("inv_pubg")));
+        text.push_str(&format!("Rust: {}\n", acc.display("inv_rust")));
+        text.push_str(&format!("Steam: {}\n", acc.display("inv_steam")));
+        text.push_str("-----Inventory-----\nInventory Empty\n\n---------------------------\n");
+        for cookie in &acc.cookies {
+            let secure = if cookie.secure { "TRUE" } else { "FALSE" };
+            text.push_str(&format!(
+                "{}\tFALSE\t/\t{}\t1764547200\t{}\t{}\n",
+                cookie.domain, secure, cookie.name, cookie.value
+            ));
+        }
+        text.push_str("---------------------------\n");
+        let name = if acc.username.is_empty() || acc.username == "—" {
+            format!("Account_{}", i + 1)
+        } else {
+            acc.username.clone()
+        };
+        let safe_name: String = name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let filepath = format!("Export/Cookies/{}.txt", safe_name);
+        if std::fs::write(&filepath, text).is_ok() {
+            exported += 1;
+        }
+    }
+    app.add_log(format!(
+        "Exported {} accounts to Export/Cookies/ folder in BL Tools format",
+        exported
+    ));
+}
+
+fn import_accounts(app: &mut App) {
+    if let Ok(data) = std::fs::read_to_string("accounts_export.json") {
+        if let Ok(imported) =
+            serde_json::from_str::<Vec<crate::models::account::AccountData>>(&data)
+        {
+            let mut new_count = 0;
+            for acc in imported {
+                if !app.accounts.iter().any(|a| a.steam_id == acc.steam_id) {
+                    app.accounts.push(acc);
+                    new_count += 1;
+                }
+            }
+            save_accounts(&app.accounts);
+            app.add_log(format!(
+                "Imported {} new accounts from accounts_export.json",
+                new_count
+            ));
+        } else {
+            app.add_log("Failed to parse accounts_export.json".to_string());
+        }
+    } else {
+        app.add_log("accounts_export.json not found".to_string());
+    }
+}
+
+fn handle_cookie_method_keys(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    _log_tx: &mpsc::UnboundedSender<String>,
+    _data_tx: &mpsc::UnboundedSender<crate::models::account::AccountData>,
+) {
+    match key.code {
+        KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Char('1') => {
+            app.input_buffer.clear();
+            app.mode = AppMode::InputPath;
+        }
+        KeyCode::Char('2') => {
+            app.input_buffer.clear();
+            app.mode = AppMode::PasteText;
+        }
+        _ => {}
+    }
+}
+
+fn handle_proxy_method_keys(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    _log_tx: &mpsc::UnboundedSender<String>,
+    _proxy_tx: &mpsc::UnboundedSender<Vec<ProxyInfo>>,
+) {
+    match key.code {
+        KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Char('1') => {
+            app.input_buffer.clear();
+            app.mode = AppMode::InputProxyPath;
+        }
+        KeyCode::Char('2') => {
+            app.input_buffer.clear();
+            app.mode = AppMode::PasteProxyText;
+        }
+        _ => {}
+    }
+}
+
+fn handle_input_path_keys(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    log_tx: &mpsc::UnboundedSender<String>,
+    data_tx: &mpsc::UnboundedSender<crate::models::account::AccountData>,
+) {
+    match key.code {
+        KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Enter => {
+            let input = app
+                .input_buffer
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            if !input.is_empty() {
+                app.mode = AppMode::Scanning;
+                app.add_log(format!("scanning: {}", input));
+                let tx = log_tx.clone();
+                let d_tx = data_tx.clone();
+                let current_proxies = app.proxies.clone();
+                tokio::spawn(async move {
+                    let all_cookies = match process_bulk_input(&input) {
+                        Ok(results) => results,
+                        Err(e) => {
+                            let _ = tx.send(format!("error: {}", e));
+                            return;
+                        }
+                    };
+                    process_cookie_results(all_cookies, &tx, &d_tx, current_proxies).await;
+                });
+            } else {
+                app.mode = AppMode::Normal;
+            }
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        KeyCode::Tab => {
+            app.input_buffer.push('\t');
+        }
+        _ => {}
+    }
+}
+
+fn handle_input_proxy_path_keys(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    log_tx: &mpsc::UnboundedSender<String>,
+    proxy_tx: &mpsc::UnboundedSender<Vec<ProxyInfo>>,
+) {
+    match key.code {
+        KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Enter => {
+            let input = app
+                .input_buffer
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            if !input.is_empty() {
+                app.mode = AppMode::Scanning;
+                app.add_log(format!("loading proxies from path: {}", input));
+                let tx = log_tx.clone();
+                let p_tx = proxy_tx.clone();
+                tokio::spawn(async move {
+                    match load_proxies_from_path(&input).await {
+                        Ok(proxies_list) => {
+                            let working = test_proxies(proxies_list, tx).await;
+                            let _ = p_tx.send(working);
+                        }
+                        Err(e) => {
+                            let _ = tx.send(format!("error: {}", e));
+                        }
+                    }
+                });
+            } else {
+                app.mode = AppMode::Normal;
+            }
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        KeyCode::Tab => {
+            app.input_buffer.push('\t');
+        }
+        _ => {}
+    }
+}
+
+fn submit_pasted_cookies(
+    app: &mut App,
+    input: String,
+    log_tx: &mpsc::UnboundedSender<String>,
+    data_tx: &mpsc::UnboundedSender<crate::models::account::AccountData>,
+) {
+    if !input.trim().is_empty() {
+        app.mode = AppMode::Scanning;
+        app.add_log("scanning pasted cookies...".to_string());
+        let tx = log_tx.clone();
+        let d_tx = data_tx.clone();
+        let current_proxies = app.proxies.clone();
+        tokio::spawn(async move {
+            let lines = input.lines().map(|s| s.to_string());
+            let parsed = parse_netscape_lines(lines);
+            if !parsed.is_empty() {
+                let grouped = crate::parser::input::group_cookies_by_account(parsed);
+                let mut all_cookies = Vec::new();
+                for (id, cookie_group) in grouped {
+                    all_cookies.push((format!("Pasted ({})", id), cookie_group));
+                }
+                process_cookie_results(all_cookies, &tx, &d_tx, current_proxies).await;
+            } else {
+                let _ = tx.send("error: no valid cookies found in pasted text".to_string());
+            }
+        });
+    } else {
+        app.mode = AppMode::Normal;
+    }
+}
+
+fn handle_paste_cookies_keys(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    log_tx: &mpsc::UnboundedSender<String>,
+    data_tx: &mpsc::UnboundedSender<crate::models::account::AccountData>,
+) {
+    match key.code {
+        KeyCode::Esc => {
+            app.input_buffer.clear();
+            app.mode = AppMode::Normal;
+        }
+        KeyCode::Enter => {
+            app.input_buffer.push('\n');
+            if app.input_buffer.ends_with("\n\n")
+                && !crossterm::event::poll(std::time::Duration::from_millis(5)).unwrap_or(false) {
+                    let input = app.input_buffer.clone();
+                    submit_pasted_cookies(app, input, log_tx, data_tx);
+                }
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        KeyCode::Tab => {
+            app.input_buffer.push('\t');
+        }
+        _ => {}
+    }
+}
+
+fn submit_pasted_proxies(
+    app: &mut App,
+    input: String,
+    log_tx: &mpsc::UnboundedSender<String>,
+    proxy_tx: &mpsc::UnboundedSender<Vec<ProxyInfo>>,
+) {
+    if !input.trim().is_empty() {
+        app.mode = AppMode::Scanning;
+        app.add_log("verifying pasted proxies...".to_string());
+        let tx = log_tx.clone();
+        let p_tx = proxy_tx.clone();
+        tokio::spawn(async move {
+            let lines = parse_proxies_from_text(&input);
+            let working = test_proxies(lines, tx).await;
+            let _ = p_tx.send(working);
+        });
+    } else {
+        app.mode = AppMode::Normal;
+    }
+}
+
+fn handle_paste_proxies_keys(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    log_tx: &mpsc::UnboundedSender<String>,
+    proxy_tx: &mpsc::UnboundedSender<Vec<ProxyInfo>>,
+) {
+    match key.code {
+        KeyCode::Esc => {
+            app.input_buffer.clear();
+            app.mode = AppMode::Normal;
+        }
+        KeyCode::Enter => {
+            app.input_buffer.push('\n');
+            if app.input_buffer.ends_with("\n\n")
+                && !crossterm::event::poll(std::time::Duration::from_millis(5)).unwrap_or(false) {
+                    let input = app.input_buffer.clone();
+                    submit_pasted_proxies(app, input, log_tx, proxy_tx);
+                }
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+        }
+        KeyCode::Tab => {
+            app.input_buffer.push('\t');
+        }
+        _ => {}
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -228,523 +805,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if event::poll(std::time::Duration::from_millis(16))? {
-            match event::read()? {
-                Event::Paste(text) => {
-                    if app.mode == AppMode::InputPath
-                        || app.mode == AppMode::InputProxyPath
-                    {
-                        app.input_buffer.push_str(&text);
-                    }
+            loop {
+                handle_tui_events(&mut app, event::read()?, &log_tx, &data_tx, &proxy_tx);
+                if !event::poll(std::time::Duration::from_millis(0))? {
+                    break;
                 }
-                Event::Mouse(mouse_event) => {
-                    if app.mode == AppMode::Normal || app.mode == AppMode::Scanning {
-                        match mouse_event.kind {
-                            crossterm::event::MouseEventKind::ScrollUp => {
-                                if app.active_tab == crate::cli::app::AppTab::System {
-                                    let i = app
-                                        .logs_state
-                                        .selected()
-                                        .unwrap_or(app.logs.len().saturating_sub(1));
-                                    app.logs_state.select(Some(i.saturating_sub(1)));
-                                } else {
-                                    app.network_scroll = app.network_scroll.saturating_sub(1);
-                                }
-                            }
-                            crossterm::event::MouseEventKind::ScrollDown => {
-                                if app.active_tab == crate::cli::app::AppTab::System {
-                                    let i = app
-                                        .logs_state
-                                        .selected()
-                                        .unwrap_or(app.logs.len().saturating_sub(1));
-                                    app.logs_state.select(Some(
-                                        (i + 1).min(app.logs.len().saturating_sub(1)),
-                                    ));
-                                } else {
-                                    app.network_scroll = app.network_scroll.saturating_add(1);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    match app.mode {
-                        AppMode::Normal | AppMode::Scanning => match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => {
-                                app.should_quit = true;
-                            }
-                            KeyCode::Tab => {
-                                if app.active_tab == crate::cli::app::AppTab::System {
-                                    app.active_tab = crate::cli::app::AppTab::Network;
-                                } else {
-                                    app.active_tab = crate::cli::app::AppTab::System;
-                                }
-                            }
-                            KeyCode::Down => {
-                                if app.active_tab == crate::cli::app::AppTab::Network {
-                                    if !app.network_requests.is_empty() {
-                                        app.selected_network_request =
-                                            (app.selected_network_request + 1)
-                                                % app.network_requests.len();
-                                        app.network_scroll = 0;
-                                        app.network_state
-                                            .select(Some(app.selected_network_request));
-                                    }
-                                } else {
-                                    app.next_account();
-                                }
-                            }
-                            KeyCode::Up => {
-                                if app.active_tab == crate::cli::app::AppTab::Network {
-                                    if !app.network_requests.is_empty() {
-                                        if app.selected_network_request > 0 {
-                                            app.selected_network_request -= 1;
-                                        } else {
-                                            app.selected_network_request =
-                                                app.network_requests.len() - 1;
-                                        }
-                                        app.network_scroll = 0;
-                                        app.network_state
-                                            .select(Some(app.selected_network_request));
-                                    }
-                                } else {
-                                    app.prev_account();
-                                }
-                            }
-                            KeyCode::Right => {
-                                if app.active_tab == crate::cli::app::AppTab::Network {
-                                    app.network_inner_tab = match app.network_inner_tab {
-                                        crate::cli::app::InnerNetworkTab::Headers => {
-                                            crate::cli::app::InnerNetworkTab::Body
-                                        }
-                                        crate::cli::app::InnerNetworkTab::Body => {
-                                            crate::cli::app::InnerNetworkTab::Cookies
-                                        }
-                                        crate::cli::app::InnerNetworkTab::Cookies => {
-                                            crate::cli::app::InnerNetworkTab::Headers
-                                        }
-                                    };
-                                    app.network_scroll = 0;
-                                }
-                            }
-                            KeyCode::Left => {
-                                if app.active_tab == crate::cli::app::AppTab::Network {
-                                    app.network_inner_tab = match app.network_inner_tab {
-                                        crate::cli::app::InnerNetworkTab::Headers => {
-                                            crate::cli::app::InnerNetworkTab::Cookies
-                                        }
-                                        crate::cli::app::InnerNetworkTab::Body => {
-                                            crate::cli::app::InnerNetworkTab::Headers
-                                        }
-                                        crate::cli::app::InnerNetworkTab::Cookies => {
-                                            crate::cli::app::InnerNetworkTab::Body
-                                        }
-                                    };
-                                    app.network_scroll = 0;
-                                }
-                            }
-                            KeyCode::Char('c') | KeyCode::Char('C') => {
-                                app.mode = AppMode::SelectCookiesMethod;
-                            }
-                            KeyCode::Char('p') | KeyCode::Char('P') => {
-                                app.mode = AppMode::SelectProxiesMethod;
-                            }
-                            KeyCode::Char('o') | KeyCode::Char('O') => {
-                                if !app.accounts.is_empty() {
-                                    let acc = &app.accounts[app.selected_account];
-                                    let cookies = acc.cookies.clone();
-                                    let tx = log_tx.clone();
-                                    let proxy = app.proxies.first().map(|p| p.url.clone());
-
-                                    tokio::spawn(async move {
-                                        let proxy_ref = proxy.as_deref();
-                                        if let Err(e) = crate::browser::cdp::open_browser_session(
-                                            &cookies, &tx, proxy_ref,
-                                        )
-                                        .await
-                                        {
-                                            let _ = tx.send(format!("Browser error: {}", e));
-                                        }
-                                    });
-                                }
-                            }
-                            KeyCode::Char('d') | KeyCode::Char('D') if !app.accounts.is_empty() => {
-                                app.accounts.remove(app.selected_account);
-                                if app.selected_account >= app.accounts.len()
-                                    && app.selected_account > 0
-                                {
-                                    app.selected_account -= 1;
-                                }
-                                app.account_state.select(Some(app.selected_account));
-                                save_accounts(&app.accounts);
-                            }
-                            KeyCode::Char('e') | KeyCode::Char('E') => {
-                                let _ = std::fs::create_dir_all("Export/Cookies");
-                                let mut exported = 0;
-                                for (i, acc) in app.accounts.iter().enumerate() {
-                                    let mut text = String::new();
-                                    text.push_str(&format!("Login: {}\n", acc.display("username")));
-                                    text.push_str(&format!(
-                                        "Profile: {}\n",
-                                        acc.display("profile_url")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Custom URL: {}\n",
-                                        acc.display("custom_url")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Steam ID: {}\n",
-                                        acc.display("steam_id")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Balance: {}\n",
-                                        acc.display("wallet_balance")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Hold Balance: {}\n",
-                                        acc.display("hold_balance")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Inventory Balance: {}\n",
-                                        acc.display("inventory_balance")
-                                    ));
-                                    text.push_str(&format!("Email: {}\n", acc.display("email")));
-                                    text.push_str(&format!("Phone: {}\n", acc.display("phone")));
-                                    text.push_str(&format!(
-                                        "Created: {}\n",
-                                        acc.display("created_date")
-                                    ));
-                                    text.push_str(&format!("Guard: {}\n", acc.display("guard")));
-                                    text.push_str(&format!("Level: {}\n", acc.display("level")));
-                                    text.push_str(&format!(
-                                        "Points: {}\n",
-                                        acc.display("steam_points")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Community Status: {}\n",
-                                        acc.display("community_ban")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Trade Ban: {}\n",
-                                        acc.display("trade_ban")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Account Type: {}\n",
-                                        acc.display("account_type")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Market Status: {}\n",
-                                        acc.display("market")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Active Lots For Sale: {}\n",
-                                        acc.display("market_active_listings")
-                                    ));
-                                    text.push_str(&format!("VAC Status: {}\n", acc.display("vac")));
-                                    text.push_str(&format!(
-                                        "CS Prime: {}\n",
-                                        acc.display("cs_prime")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Games: {}\n",
-                                        acc.display("games_count")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Hours Played: {}\n",
-                                        acc.display("hours_played")
-                                    ));
-                                    text.push_str(&format!(
-                                        "Friends: {}\n",
-                                        acc.display("friends_count")
-                                    ));
-                                    text.push_str("\n----- Game Inventories -----\n");
-                                    text.push_str(&format!("CS2: {}\n", acc.display("inv_cs2")));
-                                    text.push_str(&format!(
-                                        "Dota 2: {}\n",
-                                        acc.display("inv_dota2")
-                                    ));
-                                    text.push_str(&format!("TF2: {}\n", acc.display("inv_tf2")));
-                                    text.push_str(&format!("PUBG: {}\n", acc.display("inv_pubg")));
-                                    text.push_str(&format!("Rust: {}\n", acc.display("inv_rust")));
-                                    text.push_str(&format!(
-                                        "Steam: {}\n",
-                                        acc.display("inv_steam")
-                                    ));
-                                    text.push_str("-----Inventory-----\n");
-                                    text.push_str("Inventory Empty\n\n");
-                                    text.push_str("---------------------------\n");
-                                    for cookie in &acc.cookies {
-                                        let secure = if cookie.secure { "TRUE" } else { "FALSE" };
-                                        text.push_str(&format!(
-                                            "{}\tFALSE\t/\t{}\t1764547200\t{}\t{}\n",
-                                            cookie.domain, secure, cookie.name, cookie.value
-                                        ));
-                                    }
-                                    text.push_str("---------------------------\n");
-                                    let name = if acc.username.is_empty() || acc.username == "—" {
-                                        format!("Account_{}", i + 1)
-                                    } else {
-                                        acc.username.clone()
-                                    };
-                                    let safe_name: String = name
-                                        .chars()
-                                        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-                                        .collect();
-                                    let filepath = format!("Export/Cookies/{}.txt", safe_name);
-                                    if std::fs::write(&filepath, text).is_ok() {
-                                        exported += 1;
-                                    }
-                                }
-                                app.add_log(format!("Exported {} accounts to Export/Cookies/ folder in BL Tools format", exported));
-                            }
-                            KeyCode::Char('i') | KeyCode::Char('I') => {
-                                if let Ok(data) = std::fs::read_to_string("accounts_export.json") {
-                                    if let Ok(imported) =
-                                        serde_json::from_str::<
-                                            Vec<crate::models::account::AccountData>,
-                                        >(&data)
-                                    {
-                                        let mut new_count = 0;
-                                        for acc in imported {
-                                            if !app
-                                                .accounts
-                                                .iter()
-                                                .any(|a| a.steam_id == acc.steam_id)
-                                            {
-                                                app.accounts.push(acc);
-                                                new_count += 1;
-                                            }
-                                        }
-                                        save_accounts(&app.accounts);
-                                        app.add_log(format!(
-                                            "Imported {} new accounts from accounts_export.json",
-                                            new_count
-                                        ));
-                                    } else {
-                                        app.add_log(
-                                            "Failed to parse accounts_export.json".to_string(),
-                                        );
-                                    }
-                                } else {
-                                    app.add_log("accounts_export.json not found".to_string());
-                                }
-                            }
-                            KeyCode::PageUp => {
-                                let inner_h = 10;
-                                if app.active_tab == crate::cli::app::AppTab::System {
-                                    let i = app
-                                        .logs_state
-                                        .selected()
-                                        .unwrap_or(app.logs.len().saturating_sub(1));
-                                    app.logs_state.select(Some(i.saturating_sub(inner_h)));
-                                } else if app.active_tab == crate::cli::app::AppTab::Network {
-                                    app.network_scroll = app.network_scroll.saturating_sub(inner_h);
-                                }
-                            }
-                            KeyCode::PageDown => {
-                                let inner_h = 10;
-                                if app.active_tab == crate::cli::app::AppTab::System {
-                                    let i = app
-                                        .logs_state
-                                        .selected()
-                                        .unwrap_or(app.logs.len().saturating_sub(1));
-                                    app.logs_state.select(Some(
-                                        (i + inner_h).min(app.logs.len().saturating_sub(1)),
-                                    ));
-                                } else if app.active_tab == crate::cli::app::AppTab::Network {
-                                    app.network_scroll += inner_h;
-                                }
-                            }
-                            _ => {}
-                        },
-                        AppMode::SelectCookiesMethod => match key.code {
-                            KeyCode::Esc => {
-                                app.mode = AppMode::Normal;
-                            }
-                            KeyCode::Char('1') => {
-                                app.input_buffer.clear();
-                                app.mode = AppMode::InputPath;
-                            }
-                            KeyCode::Char('2') => {
-                                app.input_buffer.clear();
-                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                    if let Ok(input) = clipboard.get_text() {
-                                        if !input.trim().is_empty() {
-                                            app.mode = AppMode::Scanning;
-                                            app.add_log("scanning pasted cookies...".to_string());
-                                            let tx = log_tx.clone();
-                                            let data_tx = data_tx.clone();
-                                            let current_proxies = app.proxies.clone();
-                                            tokio::spawn(async move {
-                                                let lines = input.lines().map(|s| s.to_string());
-                                                let parsed = parse_netscape_lines(lines);
-                                                if !parsed.is_empty() {
-                                                    let grouped = crate::parser::input::group_cookies_by_account(parsed);
-                                                    let mut all_cookies = Vec::new();
-                                                    for (id, cookie_group) in grouped {
-                                                        all_cookies.push((
-                                                            format!("Pasted ({})", id),
-                                                            cookie_group,
-                                                        ));
-                                                    }
-                                                    process_cookie_results(
-                                                        all_cookies,
-                                                        &tx,
-                                                        &data_tx,
-                                                        current_proxies,
-                                                    )
-                                                    .await;
-                                                } else {
-                                                    let _ = tx.send("error: no valid cookies found in clipboard".to_string());
-                                                }
-                                            });
-                                        } else {
-                                            app.add_log("clipboard is empty".to_string());
-                                            app.mode = AppMode::Normal;
-                                        }
-                                    } else {
-                                        app.add_log("failed to read text from clipboard".to_string());
-                                        app.mode = AppMode::Normal;
-                                    }
-                                } else {
-                                    app.add_log("clipboard error".to_string());
-                                    app.mode = AppMode::Normal;
-                                }
-                            }
-                            _ => {}
-                        },
-                        AppMode::SelectProxiesMethod => match key.code {
-                            KeyCode::Esc => {
-                                app.mode = AppMode::Normal;
-                            }
-                            KeyCode::Char('1') => {
-                                app.input_buffer.clear();
-                                app.mode = AppMode::InputProxyPath;
-                            }
-                            KeyCode::Char('2') => {
-                                app.input_buffer.clear();
-                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                    if let Ok(input) = clipboard.get_text() {
-                                        if !input.trim().is_empty() {
-                                            app.mode = AppMode::Scanning;
-                                            app.add_log("verifying pasted proxies...".to_string());
-                                            let tx = log_tx.clone();
-                                            let proxy_tx = proxy_tx.clone();
-                                            tokio::spawn(async move {
-                                                let lines = parse_proxies_from_text(&input);
-                                                let working = test_proxies(lines, tx).await;
-                                                let _ = proxy_tx.send(working);
-                                            });
-                                        } else {
-                                            app.add_log("clipboard is empty".to_string());
-                                            app.mode = AppMode::Normal;
-                                        }
-                                    } else {
-                                        app.add_log("failed to read text from clipboard".to_string());
-                                        app.mode = AppMode::Normal;
-                                    }
-                                } else {
-                                    app.add_log("clipboard error".to_string());
-                                    app.mode = AppMode::Normal;
-                                }
-                            }
-                            _ => {}
-                        },
-                        AppMode::InputPath => match key.code {
-                            KeyCode::Esc => {
-                                app.mode = AppMode::Normal;
-                            }
-                            KeyCode::Enter => {
-                                let input = app
-                                    .input_buffer
-                                    .trim()
-                                    .trim_matches('"')
-                                    .trim_matches('\'')
-                                    .to_string();
-                                if !input.is_empty() {
-                                    app.mode = AppMode::Scanning;
-                                    app.add_log(format!("scanning: {}", input));
-                                    let tx = log_tx.clone();
-                                    let data_tx = data_tx.clone();
-                                    let current_proxies = app.proxies.clone();
-                                    tokio::spawn(async move {
-                                        let all_cookies = match process_bulk_input(&input) {
-                                            Ok(results) => results,
-                                            Err(e) => {
-                                                let _ = tx.send(format!("error: {}", e));
-                                                return;
-                                            }
-                                        };
-                                        process_cookie_results(
-                                            all_cookies,
-                                            &tx,
-                                            &data_tx,
-                                            current_proxies,
-                                        )
-                                        .await;
-                                    });
-                                } else {
-                                    app.mode = AppMode::Normal;
-                                }
-                            }
-                            KeyCode::Backspace => {
-                                app.input_buffer.pop();
-                            }
-                            KeyCode::Char(c) => {
-                                app.input_buffer.push(c);
-                            }
-                            KeyCode::Tab => {
-                                app.input_buffer.push('\t');
-                            }
-                            _ => {}
-                        },
-
-                        AppMode::InputProxyPath => match key.code {
-                            KeyCode::Esc => {
-                                app.mode = AppMode::Normal;
-                            }
-                            KeyCode::Enter => {
-                                let input = app
-                                    .input_buffer
-                                    .trim()
-                                    .trim_matches('"')
-                                    .trim_matches('\'')
-                                    .to_string();
-                                if !input.is_empty() {
-                                    app.mode = AppMode::Scanning;
-                                    app.add_log(format!("loading proxies from path: {}", input));
-                                    let tx = log_tx.clone();
-                                    let proxy_tx = proxy_tx.clone();
-                                    tokio::spawn(async move {
-                                        match load_proxies_from_path(&input).await {
-                                            Ok(proxies_list) => {
-                                                let working = test_proxies(proxies_list, tx).await;
-                                                let _ = proxy_tx.send(working);
-                                            }
-                                            Err(e) => {
-                                                let _ = tx.send(format!("error: {}", e));
-                                            }
-                                        }
-                                    });
-                                } else {
-                                    app.mode = AppMode::Normal;
-                                }
-                            }
-                            KeyCode::Backspace => {
-                                app.input_buffer.pop();
-                            }
-                            KeyCode::Char(c) => {
-                                app.input_buffer.push(c);
-                            }
-                            KeyCode::Tab => {
-                                app.input_buffer.push('\t');
-                            }
-                            _ => {}
-                        },
-
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -772,55 +837,78 @@ async fn process_cookie_results(
         return;
     }
 
-    let mut split_cookies = Vec::new();
-    for (source, cookies) in all_cookies {
-        let mut current_account = Vec::new();
-        let mut sub_idx = 1;
-        let mut current_steam_id: Option<String> = None;
-
-        for cookie in cookies {
-            if cookie.name.eq_ignore_ascii_case("steamLoginSecure") {
-                let val = &cookie.value;
-                let id = val
-                    .find("%7C%7C")
-                    .or_else(|| val.find("||"))
-                    .map(|idx| val[..idx].to_string());
-
-                if let Some(new_id) = id {
-                    if let Some(ref current_id) = current_steam_id {
-                        if new_id != *current_id {
-                            split_cookies.push((
-                                format!("{} (#{})", source, sub_idx),
-                                std::mem::take(&mut current_account),
-                            ));
-                            sub_idx += 1;
-                            current_steam_id = Some(new_id);
-                        }
-                    } else {
-                        current_steam_id = Some(new_id);
-                    }
-                }
-            }
-            current_account.push(cookie);
-        }
-        if current_account
-            .iter()
-            .any(|c: &crate::models::cookie::SteamCookie| {
-                c.name.eq_ignore_ascii_case("steamLoginSecure")
-            })
-        {
-            let name = if sub_idx > 1 {
-                format!("{} (#{})", source, sub_idx)
-            } else {
-                source
-            };
-            split_cookies.push((name, current_account));
-        }
-    }
-
+    let split_cookies = split_cookie_accounts(all_cookies);
     let total = split_cookies.len();
     let _ = tx.send(format!("found {} account(s)", total));
 
+    validate_cookie_accounts(split_cookies, tx, data_tx, proxies).await;
+}
+
+fn split_cookie_accounts(
+    all_cookies: Vec<(String, Vec<crate::models::cookie::SteamCookie>)>,
+) -> Vec<(String, Vec<crate::models::cookie::SteamCookie>)> {
+    let mut split_cookies = Vec::new();
+    for (source, cookies) in all_cookies {
+        split_cookies.extend(split_single_source(source, cookies));
+    }
+    split_cookies
+}
+
+fn split_single_source(
+    source: String,
+    cookies: Vec<crate::models::cookie::SteamCookie>,
+) -> Vec<(String, Vec<crate::models::cookie::SteamCookie>)> {
+    let mut split_cookies = Vec::new();
+    let mut current_account = Vec::new();
+    let mut sub_idx = 1;
+    let mut current_steam_id: Option<String> = None;
+
+    for cookie in cookies {
+        if cookie.name.eq_ignore_ascii_case("steamLoginSecure") {
+            let val = &cookie.value;
+            let id = val
+                .find("%7C%7C")
+                .or_else(|| val.find("||"))
+                .map(|idx| val[..idx].to_string());
+
+            if let Some(new_id) = id {
+                if let Some(ref current_id) = current_steam_id {
+                    if new_id != *current_id {
+                        split_cookies.push((
+                            format!("{} (#{})", source, sub_idx),
+                            std::mem::take(&mut current_account),
+                        ));
+                        sub_idx += 1;
+                        current_steam_id = Some(new_id);
+                    }
+                } else {
+                    current_steam_id = Some(new_id);
+                }
+            }
+        }
+        current_account.push(cookie);
+    }
+    if current_account
+        .iter()
+        .any(|c| c.name.eq_ignore_ascii_case("steamLoginSecure"))
+    {
+        let name = if sub_idx > 1 {
+            format!("{} (#{})", source, sub_idx)
+        } else {
+            source
+        };
+        split_cookies.push((name, current_account));
+    }
+    split_cookies
+}
+
+async fn validate_cookie_accounts(
+    split_cookies: Vec<(String, Vec<crate::models::cookie::SteamCookie>)>,
+    tx: &mpsc::UnboundedSender<String>,
+    data_tx: &mpsc::UnboundedSender<crate::models::account::AccountData>,
+    proxies: Vec<ProxyInfo>,
+) {
+    let total = split_cookies.len();
     for (i, (name, mut cookies)) in split_cookies.into_iter().enumerate() {
         let _ = tx.send(String::new());
         let _ = tx.send(format!(
