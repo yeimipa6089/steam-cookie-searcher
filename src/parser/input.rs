@@ -116,10 +116,6 @@ pub fn process_bulk_input(path: &str) -> Result<BulkResult, Box<dyn std::error::
         return Err("Path is neither a directory, zip file, nor a .txt file.".into());
     }
 
-    println!(
-        "  \x1b[32m✔ Found {} valid cookie files.\x1b[0m\n",
-        results.len()
-    );
     Ok(results)
 }
 
@@ -127,7 +123,6 @@ fn process_zip_file(
     path: &str,
     results: &mut BulkResult,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("  \x1b[2m↳ Extracting ZIP archive...\x1b[0m");
     let file = File::open(path)?;
     let mut archive = ZipArchive::new(file)?;
 
@@ -157,7 +152,6 @@ fn process_zip_entry<R: std::io::Read>(mut reader: R, name: String, results: &mu
 }
 
 fn process_directory(path: &str, results: &mut BulkResult) {
-    println!("  \x1b[2m↳ Scanning folder...\x1b[0m");
     for entry in WalkDir::new(path).into_iter().filter_map(Result::ok) {
         if entry.file_type().is_file() {
             let file_path = entry.path().to_string_lossy().to_string();
@@ -175,7 +169,6 @@ fn process_directory(path: &str, results: &mut BulkResult) {
 }
 
 fn process_txt_file(path: &str, results: &mut BulkResult) {
-    println!("  \x1b[2m↳ Scanning text file...\x1b[0m");
     if let Ok(parsed) = parse_netscape_cookies_from_file(path)
         && !parsed.is_empty()
     {

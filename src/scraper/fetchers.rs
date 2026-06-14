@@ -168,7 +168,7 @@ fn get_currency_from_country(country_code: &str) -> &'static str {
     }
 }
 
-fn get_usd_rate(currency: &str) -> f64 {
+pub fn get_usd_rate(currency: &str) -> f64 {
     match currency {
         "USD" => 1.0,
         "EUR" => 1.08,

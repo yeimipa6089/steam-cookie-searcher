@@ -74,6 +74,7 @@ fn build_chrome_capabilities(
     caps.add_arg("--log-level=3")?;
     caps.add_arg("--silent")?;
     caps.add_arg("--disable-logging")?;
+    let _ = caps.add_experimental_option("excludeSwitches", vec!["enable-logging"]);
 
     if let Some(proxy) = proxy_url {
         let chrome_proxy = proxy
@@ -223,20 +224,19 @@ async fn inject_cookies_into_browser(
     fresh_cookies: &[(String, String, String)],
 ) -> usize {
     let target_domains = [
-        "steamcommunity.com",
-        "store.steampowered.com",
-        "login.steampowered.com",
-        "help.steampowered.com",
-        "checkout.steampowered.com",
+        ("steamcommunity.com", "https://steamcommunity.com/robots.txt"),
+        ("store.steampowered.com", "https://store.steampowered.com/robots.txt"),
+        ("login.steampowered.com", "https://login.steampowered.com/robots.txt"),
+        ("help.steampowered.com", "https://help.steampowered.com/robots.txt"),
+        ("checkout.steampowered.com", "https://checkout.steampowered.com/robots.txt"),
     ];
 
     let mut injected = 0usize;
-    for domain in &target_domains {
-        let domain_home = format!("https://{}", domain);
-        if driver.goto(&domain_home).await.is_err() {
+    for (domain, url) in &target_domains {
+        if driver.goto(*url).await.is_err() {
             continue;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let _ = driver.delete_all_cookies().await;
 
@@ -305,8 +305,8 @@ async fn setup_local_storage(driver: &WebDriver, browser_cookies: &[thirtyfour::
 
             let _ = driver.execute(&ls_script, vec![]).await;
 
-            if driver.goto("https://store.steampowered.com/").await.is_ok() {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if driver.goto("https://steamcommunity.com/").await.is_ok() {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 let _ = driver.execute(&ls_script, vec![]).await;
             }
         }

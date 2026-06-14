@@ -8,7 +8,7 @@ fn pad(s: &str, width: usize) -> String {
 }
 
 fn convert_currency(val: &str) -> String {
-    if val.is_empty() || val == "-" || val == "—" || val == "0" {
+    if val.is_empty() || val == "-" || val == "—" || val == "0" || val.to_uppercase().contains("USD") {
         return val.to_string();
     }
 
@@ -17,32 +17,63 @@ fn convert_currency(val: &str) -> String {
         .chars()
         .filter(|c| c.is_numeric() || *c == '.')
         .collect::<String>();
-    if let Ok(num) = clean_val.parse::<f64>() {
-        let (converted, cur) = if val.contains('₹') || val.to_lowercase().contains("inr") {
-            (num * 0.012, "USD")
-        } else if val.contains('₽')
-            || val.to_lowercase().contains("rub")
-            || val.to_lowercase().contains("pуб")
-        {
-            (num * 0.011, "USD")
-        } else if val.contains('₴') || val.to_lowercase().contains("uah") {
-            (num * 0.025, "USD")
-        } else if val.contains("CHF") {
-            (num * 1.12, "USD")
-        } else if val.contains('£') {
-            (num * 1.27, "USD")
-        } else if val.contains("ARS") {
-            (num * 0.0012, "USD")
-        } else if val.contains("TRY") || val.contains("TL") {
-            (num * 0.031, "USD")
-        } else if val.contains("€") {
-            (num * 1.08, "USD")
-        } else {
-            return val.to_string();
-        };
 
-        if converted > 0.0 {
-            return format!("{} (~{:.2} {})", val, converted, cur);
+    let parts: Vec<&str> = clean_val.split('.').collect();
+    let num_str = if parts.len() > 2 {
+        format!("{}.{}", parts[..parts.len() - 1].join(""), parts.last().unwrap())
+    } else {
+        clean_val
+    };
+
+    if let Ok(num) = num_str.parse::<f64>() {
+        let cur = val.to_uppercase();
+        let currency_code = if cur.contains('€') || cur.contains("EUR") { "EUR" }
+        else if cur.contains('£') || cur.contains("GBP") { "GBP" }
+        else if cur.contains("CHF") { "CHF" }
+        else if cur.contains('₽') || cur.contains("RUB") || cur.contains("РУБ") || cur.contains("PУБ") { "RUB" }
+        else if cur.contains("PLN") || cur.contains("ZŁ") { "PLN" }
+        else if cur.contains("R$") || cur.contains("BRL") { "BRL" }
+        else if cur.contains('¥') || cur.contains("JPY") { "JPY" }
+        else if cur.contains("NOK") || cur.contains("KR") { "NOK" }
+        else if cur.contains("RP") || cur.contains("IDR") { "IDR" }
+        else if cur.contains("RM") || cur.contains("MYR") { "MYR" }
+        else if cur.contains('₱') || cur.contains("PHP") || (cur.starts_with('P') && cur.chars().nth(1).map_or(false, |c| c.is_ascii_digit())) { "PHP" }
+        else if cur.contains("S$") || cur.contains("SGD") { "SGD" }
+        else if cur.contains('฿') || cur.contains("THB") { "THB" }
+        else if cur.contains('₫') || cur.contains("VND") { "VND" }
+        else if cur.contains('₩') || cur.contains("KRW") { "KRW" }
+        else if cur.contains('₺') || cur.contains("TRY") || cur.contains("TL") { "TRY" }
+        else if cur.contains('₴') || cur.contains("UAH") { "UAH" }
+        else if cur.contains("MXN") || cur.contains("MEX$") { "MXN" }
+        else if cur.contains("CAD") || cur.contains("CDN$") { "CAD" }
+        else if cur.contains("AUD") || cur.contains("A$") { "AUD" }
+        else if cur.contains("NZD") || cur.contains("NZ$") { "NZD" }
+        else if cur.contains("CNY") || cur.contains("RMB") { "CNY" }
+        else if cur.contains('₹') || cur.contains("INR") { "INR" }
+        else if cur.contains("CLP") { "CLP" }
+        else if cur.contains("PEN") || cur.contains("S/.") { "PEN" }
+        else if cur.contains("COP") || cur.contains("COL$") { "COP" }
+        else if cur.contains("ZAR") || cur.contains("R ") { "ZAR" }
+        else if cur.contains("HKD") || cur.contains("HK$") { "HKD" }
+        else if cur.contains("TWD") || cur.contains("NT$") { "TWD" }
+        else if cur.contains("SAR") || cur.contains("SR") { "SAR" }
+        else if cur.contains("AED") { "AED" }
+        else if cur.contains("ARS") || cur.contains("ARS$") { "ARS" }
+        else if cur.contains("ILS") || cur.contains('₪') { "ILS" }
+        else if cur.contains("KZT") || cur.contains('₸') { "KZT" }
+        else if cur.contains("KWD") || cur.contains("KD") { "KWD" }
+        else if cur.contains("QAR") || cur.contains("QR") { "QAR" }
+        else if cur.contains("CRC") || cur.contains('₡') { "CRC" }
+        else if cur.contains("UYU") || cur.contains("$U") { "UYU" }
+        else if cur.contains('$') { "USD" }
+        else { "UNKNOWN" };
+
+        if currency_code != "UNKNOWN" {
+            let rate = crate::scraper::fetchers::get_usd_rate(currency_code);
+            let converted = num * rate;
+            if converted >= 0.0 {
+                return format!("{} (~{:.2} USD)", val, converted);
+            }
         }
     }
 
@@ -309,23 +340,17 @@ fn draw_accounts(f: &mut Frame, app: &mut App, area: Rect) {
 
             if !acc.is_valid {
                 name_style = name_style.fg(ERR_COLOR).remove_modifier(Modifier::BOLD);
-                spans.push(Span::styled("[EXPIRED] ", Style::default().fg(ERR_COLOR)));
+                spans.push(Span::styled("[E] ", Style::default().fg(ERR_COLOR)));
+            } else if vac_ban {
+                spans.push(Span::styled("[B] ", Style::default().fg(ERR_COLOR)));
+            } else if is_limited {
+                spans.push(Span::styled("[L] ", Style::default().fg(WARN_COLOR)));
             } else {
-                spans.push(Span::styled(
-                    "[V] ",
-                    Style::default().fg(OK_COLOR).add_modifier(Modifier::BOLD),
-                ));
+                spans.push(Span::styled("[N] ", Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD)));
             }
 
-            if vac_ban {
-                spans.push(Span::styled("[BAN] ", Style::default().fg(ERR_COLOR)));
-            } else {
-                if is_prime {
-                    spans.push(Span::styled("[Prime] ", Style::default().fg(OK_COLOR)));
-                }
-                if is_limited {
-                    spans.push(Span::styled("[L] ", Style::default().fg(WARN_COLOR)));
-                }
+            if !vac_ban && is_prime {
+                spans.push(Span::styled("[Prime] ", Style::default().fg(OK_COLOR)));
             }
 
             spans.push(Span::styled(name.to_string(), name_style));
@@ -626,12 +651,13 @@ fn determine_value_color(clean_val: &str) -> Color {
         ERR_COLOR
     } else if lower.contains("private") || lower.contains("empty") || lower.contains("non-prime") {
         TEXT_DIM
-    } else if clean_val.contains("CHF")
-        || clean_val.contains("$")
-        || clean_val.contains("€")
-        || clean_val.contains("₹")
-        || clean_val.contains("₽")
-        || clean_val.contains("£")
+    } else if lower.contains("usd")
+        || clean_val.contains("CHF")
+        || clean_val.contains('$')
+        || clean_val.contains('€')
+        || clean_val.contains('₹')
+        || clean_val.contains('₽')
+        || clean_val.contains('£')
     {
         OK_COLOR
     } else {

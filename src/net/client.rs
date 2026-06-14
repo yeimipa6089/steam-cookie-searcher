@@ -61,6 +61,12 @@ pub fn build_http_client(
         }
     }
 
+    for (_, url_str) in domain_urls {
+        if let Ok(url) = url_str.parse::<reqwest::Url>() {
+            jar.add_cookie_str("Steam_Language=english", &url);
+        }
+    }
+
     let mut builder = reqwest::Client::builder().cookie_provider(jar.clone());
 
     if let Some(proxy) = proxy_url

@@ -712,13 +712,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = setup_chromedriver(&log_tx).await;
 
-    let driver_result = std::process::Command::new(&exe_path)
+    let mut driver_cmd = std::process::Command::new(&exe_path);
+    driver_cmd
         .arg("--port=9515")
         .arg("--silent")
         .arg("--log-level=OFF")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        driver_cmd.creation_flags(0x08000008);
+    }
+
+    let driver_result = driver_cmd.spawn();
 
     let mut driver_process = driver_result.ok();
 
@@ -730,37 +738,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let val_tx = data_tx.clone();
     let val_log_tx = log_tx.clone();
     tokio::spawn(async move {
-        for mut acc in accounts_to_validate {
-            let name = acc.display("username").to_string();
-            let display_name = if name.is_empty() || name == "—" {
-                acc.steam_id.clone()
-            } else {
-                name
-            };
+        let stream = futures::stream::iter(accounts_to_validate).map(|mut acc| {
+            let val_tx = val_tx.clone();
+            let val_log_tx = val_log_tx.clone();
+            async move {
+                let name = acc.display("username").to_string();
+                let display_name = if name.is_empty() || name == "—" {
+                    acc.steam_id.clone()
+                } else {
+                    name
+                };
 
-            let _ = val_log_tx.send(format!(
-                "Validating & refreshing session for account: {}...",
-                display_name
-            ));
-
-            if let Some((mut new_data, _)) =
-                crate::scraper::orchestrator::scrape_all_data(&mut acc.cookies, &val_log_tx, &[])
-                    .await
-            {
-                new_data.cookies = acc.cookies;
-                let _ = val_log_tx
-                    .send("  -> Completed: Session is valid and data refreshed.".to_string());
-                let _ = val_tx.send(new_data);
-            } else {
-                acc.is_valid = false;
                 let _ = val_log_tx.send(format!(
-                    "  -> [Error] Session expired for: {}",
+                    "Validating & refreshing session for account: {}...",
                     display_name
                 ));
-                let _ = val_tx.send(acc);
+
+                let (dummy_tx, _) = tokio::sync::mpsc::unbounded_channel();
+                if let Some((mut new_data, _)) =
+                    crate::scraper::orchestrator::scrape_all_data(&mut acc.cookies, &dummy_tx, &[])
+                        .await
+                {
+                    new_data.cookies = acc.cookies;
+                    let _ = val_log_tx
+                        .send(format!("  -> Completed: Session is valid and data refreshed for {}.", display_name));
+                    let _ = val_tx.send(new_data);
+                } else {
+                    acc.is_valid = false;
+                    let _ = val_log_tx.send(format!(
+                        "  -> [Error] Session expired for: {}",
+                        display_name
+                    ));
+                    let _ = val_tx.send(acc);
+                }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        }
+        });
+        stream.buffer_unordered(10).collect::<Vec<_>>().await;
     });
 
     loop {
@@ -909,19 +922,26 @@ async fn validate_cookie_accounts(
     proxies: Vec<ProxyInfo>,
 ) {
     let total = split_cookies.len();
-    for (i, (name, mut cookies)) in split_cookies.into_iter().enumerate() {
-        let _ = tx.send(String::new());
-        let _ = tx.send(format!(
-            "[{}/{}] Validating session for account: {}...",
-            i + 1,
-            total,
-            name
-        ));
-        if let Some((data, _)) = scrape_all_data(&mut cookies, tx, &proxies).await {
-            let _ = data_tx.send(data);
-            let _ = tx.send(format!("[{}/{}] Completed: {}", i + 1, total, name));
-        } else {
-            let _ = tx.send(format!("[{}/{}] Failed: {}", i + 1, total, name));
+    let stream = futures::stream::iter(split_cookies.into_iter().enumerate()).map(|(i, (name, mut cookies))| {
+        let tx = tx.clone();
+        let data_tx = data_tx.clone();
+        let proxies = proxies.clone();
+        async move {
+            let _ = tx.send(format!(
+                "[{}/{}] Validating session for account: {}...",
+                i + 1,
+                total,
+                name
+            ));
+            
+            let (dummy_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            if let Some((data, _)) = crate::scraper::orchestrator::scrape_all_data(&mut cookies, &dummy_tx, &proxies).await {
+                let _ = data_tx.send(data);
+                let _ = tx.send(format!("[{}/{}] Completed: {}", i + 1, total, name));
+            } else {
+                let _ = tx.send(format!("[{}/{}] Failed: {}", i + 1, total, name));
+            }
         }
-    }
+    });
+    stream.buffer_unordered(10).collect::<Vec<_>>().await;
 }
